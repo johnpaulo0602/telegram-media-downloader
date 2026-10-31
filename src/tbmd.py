@@ -48,6 +48,7 @@ ARCHIVE_MIMES = {
     "application/gzip",
 }
 ARCHIVE_EXTS = (".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz")
+AUDIO_EXTS = (".mp3", ".m4a", ".flac", ".wav", ".ogg", ".opus", ".aac", ".wma")
 
 # Media types: CLI key -> label shown to the user, output folder and Telegram filter
 MEDIA_TYPES = {
@@ -55,6 +56,7 @@ MEDIA_TYPES = {
     "videos": {"label": "Vídeos", "folder": "videos", "filter": InputMessagesFilterVideo},
     "pdfs": {"label": "PDFs", "folder": "pdfs", "filter": InputMessagesFilterDocument},
     "archives": {"label": "ZIP e arquivos compactados", "folder": "archives", "filter": InputMessagesFilterDocument},
+    "audios": {"label": "Áudios e músicas", "folder": "audio", "filter": None},
     "all": {"label": "Todos os tipos de mídia", "folder": "all_media", "filter": None},
 }
 
@@ -222,6 +224,19 @@ def filter_media_messages(messages, media_type: str) -> list:
             if msg.document and (
                 msg.document.mime_type in ARCHIVE_MIMES
                 or (msg.file and msg.file.name and msg.file.name.lower().endswith(ARCHIVE_EXTS))
+            )
+        ]
+    if media_type == "audios":
+        return [
+            msg for msg in messages
+            if getattr(msg, "audio", None)
+            or getattr(msg, "voice", None)
+            or (
+                msg.document
+                and (
+                    (getattr(msg.document, "mime_type", None) or "").startswith("audio/")
+                    or (msg.file and msg.file.name and msg.file.name.lower().endswith(AUDIO_EXTS))
+                )
             )
         ]
     if media_type == "all":

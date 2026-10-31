@@ -210,6 +210,13 @@ class TestMediaFiltering(unittest.TestCase):
         result = tbmd.filter_media_messages([pdf, zip_file, rar_file], "archives")
         self.assertEqual(result, [zip_file, rar_file])
 
+    def test_audios(self):
+        mp3_doc = make_message("audio/mpeg", "song.mp3")
+        flac_doc = make_message("application/octet-stream", "track.FLAC")
+        pdf = make_message("application/pdf", "a.pdf")
+        result = tbmd.filter_media_messages([mp3_doc, flac_doc, pdf], "audios")
+        self.assertEqual(result, [mp3_doc, flac_doc])
+
     def test_all_skips_messages_without_file(self):
         with_file = make_message("video/mp4", "v.mp4")
         text_only = make_message(media=False)

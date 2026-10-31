@@ -1,5 +1,6 @@
 import asyncio
 import os
+import shutil
 import sys
 import time
 from collections import deque
@@ -137,6 +138,15 @@ def browse_directory(target_path: str | None, default_dir: str, show_hidden: boo
 
     directories.sort(key=lambda d: d["name"].casefold())
 
+    disk_free = 0
+    disk_total = 0
+    try:
+        usage = shutil.disk_usage(browse_target)
+        disk_free = usage.free
+        disk_total = usage.total
+    except OSError:
+        pass
+
     return {
         "requested_path": expanded,
         "current_path": browse_target,
@@ -148,6 +158,8 @@ def browse_directory(target_path: str | None, default_dir: str, show_hidden: boo
         "directories": directories,
         "shortcuts": get_filesystem_shortcuts(default_dir),
         "is_docker": is_running_in_docker(),
+        "disk_free_bytes": disk_free,
+        "disk_total_bytes": disk_total,
     }
 
 
@@ -198,6 +210,7 @@ class WebDownloadManager:
         self.started_at: float | None = None
         self.finished_at: float | None = None
         self.total_files: int = 0
+        self.completed_bytes: int = 0
 
         # WebSocket clients
         self.ws_clients: set[WebSocket] = set()
@@ -287,6 +300,11 @@ class WebDownloadManager:
 
         default_dir = os.path.abspath(os.path.expanduser((self.config or {}).get("download_dir", "downloads")))
 
+        active_list = list(self.active_workers.values())
+        total_speed_bps = sum(w.get("speed_bps", 0) for w in active_list)
+        in_flight_bytes = sum(w.get("current", 0) for w in active_list)
+        bytes_downloaded = self.completed_bytes + in_flight_bytes
+
         return {
             "telegram": {
                 "connected": self.connected,
@@ -317,7 +335,9 @@ class WebDownloadManager:
                 "percent": round((processed / self.total_files) * 100, 1) if self.total_files > 0 else 0.0,
                 "elapsed_seconds": round(elapsed, 1),
                 "flood_wait_seconds": flood_remaining,
-                "active_workers": list(self.active_workers.values()),
+                "total_speed_bps": round(total_speed_bps),
+                "bytes_downloaded": bytes_downloaded,
+                "active_workers": active_list,
                 "recent_logs": list(self.recent_logs),
             },
         }
@@ -408,7 +428,9 @@ class WebDownloadManager:
 
         elif event_type == "file_complete":
             self.active_workers.pop(msg_id, None)
-            self._add_log("success", filename, "Baixado com sucesso", size=payload.get("size"))
+            file_bytes = payload.get("size") or 0
+            self.completed_bytes += file_bytes
+            self._add_log("success", filename, "Baixado com sucesso", size=file_bytes)
             asyncio.create_task(self.broadcast_state(force=True))
 
         elif event_type == "file_skipped":
@@ -531,6 +553,7 @@ class WebDownloadManager:
         self.started_at = time.time()
         self.finished_at = None
         self.total_files = 0
+        self.completed_bytes = 0
         self.flood_wait_until = 0.0
 
         dest_dir = self.resolve_destination(req.dest_dir, req.media_type, req.append_type_folder)
@@ -742,6 +765,13 @@ async def api_start_downloads(req: StartDownloadRequest):
 @app.post("/api/downloads/cancel")
 async def api_cancel_downloads():
     return await manager.cancel_job()
+
+
+@app.post("/api/logs/clear")
+async def api_clear_logs():
+    manager.recent_logs.clear()
+    await manager.broadcast_state(force=True)
+    return manager.get_snapshot()
 
 
 @app.websocket("/api/ws")

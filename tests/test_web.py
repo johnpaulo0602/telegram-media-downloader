@@ -24,6 +24,8 @@ class TestFilesystemBrowser(unittest.TestCase):
             res = web.browse_directory(tmpdir, default_dir=tmpdir, show_hidden=False)
             self.assertTrue(res["exists"])
             self.assertTrue(res["writable"])
+            self.assertGreater(res["disk_total_bytes"], 0)
+            self.assertGreater(res["disk_free_bytes"], 0)
             dir_names = [d["name"] for d in res["directories"]]
             self.assertEqual(dir_names, ["Fotos", "Videos"])
             self.assertTrue(len(res["breadcrumbs"]) >= 1)
@@ -147,6 +149,13 @@ class TestWebEndpoints(unittest.TestCase):
 
         p3 = web.manager.resolve_destination("/mnt/media", "videos", append_type_folder=False)
         self.assertEqual(p3, os.path.abspath("/mnt/media"))
+
+    def test_clear_logs_endpoint(self):
+        web.manager._add_log("info", "test.mp4", "Teste")
+        self.assertGreater(len(web.manager.recent_logs), 0)
+        resp = self.client.post("/api/logs/clear")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["job"]["recent_logs"], [])
 
 
 if __name__ == "__main__":
