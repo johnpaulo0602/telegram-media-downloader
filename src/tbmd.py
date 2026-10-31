@@ -264,14 +264,37 @@ def dialog_kind(dialog) -> str:
 
 
 def search_dialogs(dialogs, term: str) -> list:
-    """Return dialogs whose name or username contains the search term."""
-    needle = normalize_text(term.strip())
-    if not needle:
+    """Return dialogs whose name, @username, t.me URL, or ID matches the search term."""
+    raw = (term or "").strip()
+    if not raw:
         return []
+
+    needle = normalize_text(raw.lstrip("@"))
+    parsed = parse_chat_input(raw)
+    parsed_needle = normalize_text(str(parsed).lstrip("@")) if parsed is not None else ""
+
+    if not needle and not parsed_needle:
+        return []
+
     results = []
     for dialog in dialogs:
-        username = getattr(dialog.entity, "username", None) or ""
-        if needle in normalize_text(dialog.name) or needle in normalize_text(username):
+        name_norm = normalize_text(getattr(dialog, "name", "") or "")
+        username_norm = normalize_text(getattr(dialog.entity, "username", None) or "")
+        dialog_id_str = str(getattr(dialog, "id", "") or "")
+        entity_id_str = str(getattr(dialog.entity, "id", "") or "")
+
+        matched = False
+        for token in {t for t in (needle, parsed_needle) if t}:
+            if (
+                token in name_norm
+                or token in username_norm
+                or (dialog_id_str and token in dialog_id_str)
+                or (entity_id_str and token in entity_id_str)
+            ):
+                matched = True
+                break
+
+        if matched:
             results.append(dialog)
     return results
 

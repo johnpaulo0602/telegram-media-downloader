@@ -474,6 +474,34 @@ class WebDownloadManager:
                 "unread_count": d.unread_count or 0,
                 "input_value": f"@{username}" if username else str(d.id),
             })
+
+        # Fallback: if no cached dialog matched and query looks like @username, t.me URL, or numeric ID,
+        # attempt to resolve directly via Telegram API so public channels/links also work in the search bar.
+        cleaned_q = (query or "").strip()
+        if not results and cleaned_q and (
+            cleaned_q.startswith("@")
+            or "t.me/" in cleaned_q
+            or cleaned_q.lstrip("-").isdigit()
+        ):
+            try:
+                entity = await tbmd.resolve_channel(self.client, cleaned_q)
+                if entity is not None:
+                    username = getattr(entity, "username", None)
+                    entity_id = utils.get_peer_id(entity)
+                    is_group = bool(getattr(entity, "megagroup", False) or getattr(entity, "gigagroup", False))
+                    is_channel = bool(getattr(entity, "broadcast", False))
+                    kind = "Grupo" if is_group else ("Canal" if is_channel else ("Bot" if getattr(entity, "bot", False) else "Usuário"))
+                    results.append({
+                        "id": entity_id,
+                        "name": utils.get_display_name(entity) or cleaned_q,
+                        "kind": kind,
+                        "username": f"@{username}" if username else None,
+                        "unread_count": 0,
+                        "input_value": f"@{username}" if username else str(entity_id),
+                    })
+            except Exception:
+                pass
+
         return results
 
     async def preview_media(self, req: PreviewRequest) -> dict[str, Any]:

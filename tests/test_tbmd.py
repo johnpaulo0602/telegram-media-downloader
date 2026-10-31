@@ -157,18 +157,18 @@ class TestConfigLoading(unittest.TestCase):
         self.assertEqual(config["download_dir"], "/tmp/tg")
 
 
-def make_dialog(name, username=None, is_channel=False, is_group=False, bot=False):
-    entity = SimpleNamespace(username=username, bot=bot)
-    return SimpleNamespace(name=name, entity=entity, is_channel=is_channel, is_group=is_group)
+def make_dialog(name, username=None, is_channel=False, is_group=False, bot=False, dialog_id=-100111222):
+    entity = SimpleNamespace(username=username, bot=bot, id=abs(dialog_id))
+    return SimpleNamespace(name=name, entity=entity, is_channel=is_channel, is_group=is_group, id=dialog_id)
 
 
 class TestDialogs(unittest.TestCase):
     def setUp(self):
         self.dialogs = [
-            make_dialog("Curso de Inglês", username="ingles_wave", is_channel=True),
-            make_dialog("Família", is_group=True),
-            make_dialog("Música Clássica", is_channel=True, is_group=True),
-            make_dialog("Helper", username="helper_bot", bot=True),
+            make_dialog("Curso de Inglês", username="ingles_wave", is_channel=True, dialog_id=-100987654),
+            make_dialog("Família", is_group=True, dialog_id=-555444333),
+            make_dialog("Música Clássica", is_channel=True, is_group=True, dialog_id=-100222333),
+            make_dialog("Helper", username="helper_bot", bot=True, dialog_id=777888),
         ]
 
     def test_search_ignores_case_and_accents(self):
@@ -180,6 +180,12 @@ class TestDialogs(unittest.TestCase):
     def test_search_matches_username(self):
         names = [d.name for d in tbmd.search_dialogs(self.dialogs, "wave")]
         self.assertEqual(names, ["Curso de Inglês"])
+
+    def test_search_matches_at_username_url_and_id(self):
+        self.assertEqual([d.name for d in tbmd.search_dialogs(self.dialogs, "@ingles_wave")], ["Curso de Inglês"])
+        self.assertEqual([d.name for d in tbmd.search_dialogs(self.dialogs, "https://t.me/ingles_wave")], ["Curso de Inglês"])
+        self.assertEqual([d.name for d in tbmd.search_dialogs(self.dialogs, "-100987654")], ["Curso de Inglês"])
+        self.assertEqual([d.name for d in tbmd.search_dialogs(self.dialogs, "555444333")], ["Família"])
 
     def test_search_empty_term(self):
         self.assertEqual(tbmd.search_dialogs(self.dialogs, "   "), [])

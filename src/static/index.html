@@ -258,35 +258,28 @@
               </button>
             </div>
 
-            <!-- Direct Input & Search Filter -->
-            <div class="grid grid-cols-1 sm:grid-cols-12 gap-2.5">
-              <!-- Target Input (7 cols) -->
-              <div class="sm:col-span-7 relative flex items-center">
-                <div class="absolute left-3 text-on-surface-variant flex items-center pointer-events-none">
-                  <svg class="w-4 h-4 text-primary" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-                    <path d="m22 2-7 20-4-9-9-4Z"></path>
-                    <path d="M22 2 11 13"></path>
-                  </svg>
-                </div>
-                <input type="text"
-                       x-model="form.chat"
-                       placeholder="Alvo: @canal, https://t.me/... ou -100123456"
-                       class="w-full pl-9 pr-3 py-2.5 rounded-lg bg-surface-container border border-surface-container-high text-on-surface placeholder:text-outline font-data-mono-sm text-data-mono-sm focus:outline-none focus:border-primary transition-all" />
+            <!-- Unified Search Filter (Name, @username, URL t.me, or ID) -->
+            <div class="relative flex items-center">
+              <div class="absolute left-3.5 text-on-surface-variant flex items-center pointer-events-none">
+                <svg class="w-4 h-4 text-primary" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" viewBox="0 0 24 24">
+                  <circle cx="11" cy="11" r="8"></circle>
+                  <line x1="21" x2="16.65" y1="21" y2="16.65"></line>
+                </svg>
               </div>
-
-              <!-- Search Filter in Dialogs (5 cols) -->
-              <div class="sm:col-span-5 relative flex items-center">
-                <div class="absolute left-3 text-on-surface-variant flex items-center pointer-events-none">
-                  <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" viewBox="0 0 24 24">
-                    <circle cx="11" cy="11" r="8"></circle>
-                    <line x1="21" x2="16.65" y1="21" y2="16.65"></line>
-                  </svg>
-                </div>
-                <input type="text"
-                       x-model="dialogSearch"
-                       @input.debounce.250ms="loadDialogs(false)"
-                       placeholder="Filtrar lista por nome..."
-                       class="w-full pl-9 pr-3 py-2.5 rounded-lg bg-surface-container border border-surface-container-high text-on-surface placeholder:text-outline font-body-sm text-body-sm focus:outline-none focus:border-primary transition-all" />
+              <input type="text"
+                     x-model="dialogSearch"
+                     @input.debounce.250ms="loadDialogs(false)"
+                     placeholder="Buscar por nome, @username, link https://t.me/... ou ID (-100...)"
+                     class="w-full pl-10 pr-20 py-2.5 rounded-lg bg-surface-container border border-surface-container-high text-on-surface placeholder:text-outline font-data-mono-sm text-data-mono-sm focus:outline-none focus:border-primary transition-all" />
+              <div class="absolute right-2.5 flex items-center gap-1.5">
+                <button x-cloak
+                        x-show="dialogSearch"
+                        @click="dialogSearch = ''; loadDialogs(false)"
+                        title="Limpar busca"
+                        type="button"
+                        class="px-2 py-0.5 rounded bg-surface-container-highest text-on-surface-variant hover:text-on-surface font-label-caps text-label-caps uppercase transition-colors">
+                  Limpar
+                </button>
               </div>
             </div>
 
@@ -757,18 +750,18 @@
 
           <!-- Bottom Action Execution Bar -->
           <div class="p-space-md rounded-xl bg-surface-container-low border border-surface-container-high/80 flex flex-col sm:flex-row items-center justify-between gap-space-md">
-            <div class="flex items-center gap-2 text-on-surface-variant font-data-mono-sm text-data-mono-sm">
+            <div class="flex items-center gap-2 text-on-surface-variant font-data-mono-sm text-data-mono-sm min-w-0">
               <svg class="w-4 h-4 text-tertiary shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
                 <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
               </svg>
-              <span x-text="(form.chat ? ('Alvo: ' + form.chat) : 'Selecione um canal') + ' • ' + form.batch_size + ' Workers alocados'"></span>
+              <span class="truncate" x-text="(effectiveChat() ? ('Selecionado: ' + (selectedDialogName || effectiveChat())) : 'Selecione um canal na lista') + ' • ' + form.batch_size + ' Workers alocados'"></span>
             </div>
 
-            <div class="flex items-center gap-space-sm w-full sm:w-auto">
+            <div class="flex items-center gap-space-sm w-full sm:w-auto shrink-0">
               <!-- Secondary Action: Scan Media -->
               <button type="button"
                       @click="previewMedia()"
-                      :disabled="previewLoading || isJobRunning() || !form.chat || !state.telegram.authorized"
+                      :disabled="previewLoading || isJobRunning() || !effectiveChat() || !state.telegram.authorized"
                       class="flex-1 sm:flex-initial inline-flex items-center justify-center gap-2 px-space-md py-2.5 rounded-lg bg-surface-container border border-surface-container-highest hover:bg-surface-container-high disabled:opacity-50 text-on-surface text-body-md font-medium transition-colors">
                 <svg class="w-4 h-4 text-secondary" :class="previewLoading && 'animate-spin'" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" viewBox="0 0 24 24">
                   <circle cx="12" cy="12" r="10"></circle>
@@ -780,7 +773,7 @@
               <!-- Primary Action: Start Batch Download -->
               <button type="button"
                       @click="startDownload()"
-                      :disabled="isJobRunning() || !form.chat || !state.telegram.authorized"
+                      :disabled="isJobRunning() || !effectiveChat() || !state.telegram.authorized"
                       class="flex-1 sm:flex-initial inline-flex items-center justify-center gap-2 px-space-lg py-2.5 rounded-lg bg-primary text-on-primary hover:bg-secondary disabled:opacity-50 font-headline-sm text-body-md font-bold transition-all shadow-[0_0_16px_rgba(76,215,246,0.35)]">
                 <svg class="w-4 h-4 text-on-primary" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" viewBox="0 0 24 24">
                   <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
@@ -1091,6 +1084,7 @@
         loadingDialogs: false,
         dialogs: [],
         dialogSearch: '',
+        selectedDialogName: '',
         previewLoading: false,
         previewResult: null,
         actionError: null,
@@ -1255,6 +1249,10 @@
             if (res.ok) {
               const data = await res.json();
               this.dialogs = data.dialogs || [];
+              // Auto-select if the search narrowed down to a single exact result
+              if (this.dialogs.length === 1 && (this.dialogSearch || '').trim()) {
+                this.selectDialog(this.dialogs[0]);
+              }
             }
           } catch (e) {
             console.error('Erro ao listar canais:', e);
@@ -1265,7 +1263,17 @@
 
         selectDialog(d) {
           this.form.chat = d.input_value;
+          this.selectedDialogName = d.name || d.input_value;
           this.previewResult = null;
+        },
+
+        effectiveChat() {
+          if (this.form.chat) return this.form.chat;
+          const q = (this.dialogSearch || '').trim();
+          if (q.startsWith('@') || q.includes('t.me/') || /^-?\d+$/.test(q)) {
+            return q;
+          }
+          return '';
         },
 
         isDialogSelected(d) {
@@ -1327,7 +1335,8 @@
         },
 
         async previewMedia() {
-          if (!this.form.chat) return;
+          const targetChat = this.effectiveChat();
+          if (!targetChat) return;
           this.previewLoading = true;
           this.actionError = null;
           this.previewResult = null;
@@ -1336,7 +1345,7 @@
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
-                chat: this.form.chat,
+                chat: targetChat,
                 media_type: this.form.media_type,
                 message_limit: this.form.message_limit,
                 dest_dir: this.form.dest_dir,
@@ -1357,14 +1366,15 @@
         },
 
         async startDownload() {
-          if (!this.form.chat) return;
+          const targetChat = this.effectiveChat();
+          if (!targetChat) return;
           this.actionError = null;
           try {
             const res = await fetch('/api/downloads/start', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
-                chat: this.form.chat,
+                chat: targetChat,
                 media_type: this.form.media_type,
                 message_limit: this.form.message_limit,
                 batch_size: this.form.batch_size,
