@@ -153,6 +153,30 @@ python src/tbmd.py -c @canalexemplo -t videos -o ~/Videos/curso -y
 | `-y`, `--yes` | Usa a pasta padrão e não pede confirmação |
 | `--list` | Lista seus canais e grupos e sai |
 | `--search TERMO` | Busca chats pelo nome e sai |
+| `--web` | Inicia a interface Web (Homelab UI) |
+| `--host` | Host do servidor Web (padrão: `0.0.0.0`) |
+| `--port` | Porta do servidor Web (padrão: `8000`) |
+
+### Interface Web (Homelab UI)
+
+Para usar o painel visual em página única (com seleção de canais, explorador de pastas do servidor/volumes e progresso em tempo real via WebSocket):
+
+```bash
+python src/tbmd.py --web
+# ou especificar porta:
+python src/tbmd.py --web --port 8080
+```
+
+Acesse `http://localhost:8000` (ou o IP do seu servidor no homelab).
+
+#### Executando com Docker Compose no Homelab
+
+1. Autentique sua sessão na primeira vez via terminal (`python src/tbmd.py --list`) para gerar o arquivo `default_session.session`.
+2. Suba o container:
+   ```bash
+   docker compose up -d --build
+   ```
+3. Os volumes mapeados no `docker-compose.yml` (como `/downloads`, `/media`, `/mnt`) aparecem automaticamente nos atalhos do seletor de pastas da interface web.
 
 ---
 

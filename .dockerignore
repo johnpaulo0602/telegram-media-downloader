@@ -1,0 +1,11 @@
+venv/
+.venv/
+__pycache__/
+*.pyc
+.git/
+.env
+*.session
+*.session-journal
+downloads/
+download_state.json
+.DS_Store

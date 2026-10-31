@@ -1,0 +1,918 @@
+<!DOCTYPE html>
+<html lang="pt-BR" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Telegram Media Downloader — Homelab UI</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            slate: {
+              850: '#151f32',
+              950: '#0b1120',
+            }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    [x-cloak] { display: none !important; }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #0f172a; }
+    ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: #475569; }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen font-sans antialiased selection:bg-sky-500 selection:text-white" x-data="tbmdApp()" x-init="init()">
+
+  <!-- Top Navbar -->
+  <header class="border-b border-slate-800 bg-slate-900/80 backdrop-blur sticky top-0 z-30">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 py-3 flex flex-wrap items-center justify-between gap-3">
+      <div class="flex items-center gap-3">
+        <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-sky-500 to-blue-600 flex items-center justify-center shadow-lg shadow-sky-500/20">
+          <svg class="w-6 h-6 text-white" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M9 19l3 3m0 0l3-3m-3 3V10" />
+          </svg>
+        </div>
+        <div>
+          <div class="flex items-center gap-2">
+            <h1 class="text-lg font-bold tracking-tight text-white">Telegram Media Downloader</h1>
+            <span class="text-xs px-2 py-0.5 rounded-full font-medium border"
+                  :class="state.environment.is_docker ? 'bg-indigo-500/10 text-indigo-300 border-indigo-500/30' : 'bg-amber-500/10 text-amber-300 border-amber-500/30'"
+                  x-text="state.environment.is_docker ? 'Docker / Container' : 'Host Local (Dev)'">
+            </span>
+          </div>
+          <p class="text-xs text-slate-400">Homelab Batch Downloader &bull; Sessões retomáveis</p>
+        </div>
+      </div>
+
+      <!-- Status Indicators -->
+      <div class="flex items-center gap-3 flex-wrap">
+        <!-- WebSocket Live Indicator -->
+        <div class="flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-lg bg-slate-800/90 border border-slate-700/70">
+          <span class="w-2 h-2 rounded-full" :class="wsConnected ? 'bg-emerald-400 animate-pulse' : 'bg-rose-500'"></span>
+          <span class="text-slate-300" x-text="wsConnected ? 'Tempo real ativo' : 'Reconectando...'"></span>
+        </div>
+
+        <!-- Telegram Auth Badge -->
+        <template x-if="state.telegram.authorized && state.telegram.user">
+          <div class="flex items-center gap-2 text-xs px-3 py-1.5 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-300">
+            <svg class="w-4 h-4 text-emerald-400 shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <span>
+              Conectado como <strong class="font-semibold text-white" x-text="state.telegram.user.name"></strong>
+              <span x-show="state.telegram.user.username" class="text-emerald-400/80" x-text="'(@' + state.telegram.user.username + ')'"></span>
+            </span>
+          </div>
+        </template>
+
+        <template x-if="!state.telegram.authorized">
+          <div class="flex items-center gap-2 text-xs px-3 py-1.5 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-300">
+            <svg class="w-4 h-4 text-rose-400 shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+            </svg>
+            <span>Sessão não autenticada</span>
+            <button @click="reconnectTelegram()" class="ml-1 underline hover:text-white font-medium">Reconectar</button>
+          </div>
+        </template>
+      </div>
+    </div>
+  </header>
+
+  <!-- Alert Banner if Telegram is not authorized or .env has error -->
+  <div x-cloak x-show="!state.telegram.authorized || state.telegram.error" class="max-w-7xl mx-auto px-4 sm:px-6 mt-4">
+    <div class="p-4 rounded-xl bg-rose-950/50 border border-rose-500/40 text-rose-200 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+      <div class="space-y-1 text-sm">
+        <p class="font-semibold text-rose-100">Atenção: Autenticação do Telegram necessária</p>
+        <p x-show="state.telegram.error" x-text="state.telegram.error" class="text-rose-300"></p>
+        <p x-show="!state.telegram.error" class="text-rose-300">
+          O arquivo <code class="px-1.5 py-0.5 rounded bg-rose-900/60 text-rose-100" x-text="state.telegram.session_name + '.session'"></code> ainda não está autenticado.
+          Execute <code class="px-1.5 py-0.5 rounded bg-rose-900/60 text-rose-100">python src/tbmd.py --list</code> uma vez no terminal para validar o código do Telegram e depois clique em <strong>Reconectar</strong>.
+        </p>
+      </div>
+      <button @click="reconnectTelegram()" class="px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold shrink-0 transition">
+        Tentar Reconectar
+      </button>
+    </div>
+  </div>
+
+  <!-- Main Grid -->
+  <main class="max-w-7xl mx-auto px-4 sm:px-6 py-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
+
+    <!-- LEFT COLUMN: Configuration (7 cols on lg) -->
+    <div class="lg:col-span-7 space-y-6">
+
+      <!-- STEP 1: Select Channel / Chat -->
+      <section class="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl space-y-4">
+        <div class="flex items-center justify-between">
+          <div class="flex items-center gap-2.5">
+            <span class="w-6 h-6 rounded-full bg-sky-500/20 text-sky-400 border border-sky-500/30 text-xs font-bold flex items-center justify-center">1</span>
+            <h2 class="text-base font-semibold text-white">Canal, Grupo ou Chat de Origem</h2>
+          </div>
+          <button @click="loadDialogs(true)"
+                  :disabled="loadingDialogs || !state.telegram.authorized"
+                  class="text-xs px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 flex items-center gap-1.5 disabled:opacity-50 transition">
+            <svg class="w-3.5 h-3.5" :class="loadingDialogs && 'animate-spin'" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+            </svg>
+            <span x-text="loadingDialogs ? 'Carregando...' : 'Atualizar Lista'"></span>
+          </button>
+        </div>
+
+        <!-- Direct input + Search filter -->
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div>
+            <label class="block text-xs font-medium text-slate-400 mb-1">Alvo selecionado (@username, link t.me ou ID)</label>
+            <input type="text"
+                   x-model="form.chat"
+                   placeholder="Ex: @canalexemplo, https://t.me/... ou -100123456"
+                   class="w-full px-3.5 py-2 rounded-xl bg-slate-950 border border-slate-700 focus:border-sky-500 focus:outline-none text-sm text-white placeholder-slate-500" />
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-slate-400 mb-1">Filtrar seus canais e grupos</label>
+            <div class="relative">
+              <input type="text"
+                     x-model="dialogSearch"
+                     @input.debounce.250ms="loadDialogs(false)"
+                     placeholder="Buscar por nome ou @username..."
+                     class="w-full pl-9 pr-3.5 py-2 rounded-xl bg-slate-950 border border-slate-700 focus:border-sky-500 focus:outline-none text-sm text-white placeholder-slate-500" />
+              <svg class="w-4 h-4 text-slate-500 absolute left-3 top-2.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+              </svg>
+            </div>
+          </div>
+        </div>
+
+        <!-- Dialogs list -->
+        <div class="border border-slate-800 rounded-xl bg-slate-950/70 max-h-56 overflow-y-auto divide-y divide-slate-800/70">
+          <template x-if="loadingDialogs && dialogs.length === 0">
+            <div class="p-6 text-center text-xs text-slate-400">Carregando seus canais e grupos do Telegram...</div>
+          </template>
+
+          <template x-if="!loadingDialogs && dialogs.length === 0">
+            <div class="p-5 text-center text-xs text-slate-500">
+              Nenhum chat listado. Clique em "Atualizar Lista" ou digite o @username / ID diretamente no campo acima.
+            </div>
+          </template>
+
+          <template x-for="d in dialogs" :key="d.id">
+            <button type="button"
+                    @click="selectDialog(d)"
+                    class="w-full px-3.5 py-2.5 text-left flex items-center justify-between gap-3 hover:bg-slate-800/60 transition"
+                    :class="(form.chat === d.input_value || form.chat === String(d.id)) ? 'bg-sky-500/10 border-l-2 border-sky-400' : ''">
+              <div class="min-w-0 flex-1">
+                <div class="flex items-center gap-2">
+                  <span class="font-medium text-sm text-slate-100 truncate" x-text="d.name"></span>
+                  <span class="text-[10px] px-1.5 py-0.5 rounded font-medium shrink-0"
+                        :class="{
+                          'bg-purple-500/15 text-purple-300': d.kind === 'Canal',
+                          'bg-blue-500/15 text-blue-300': d.kind === 'Grupo',
+                          'bg-emerald-500/15 text-emerald-300': d.kind === 'Usuário',
+                          'bg-amber-500/15 text-amber-300': d.kind === 'Bot'
+                        }"
+                        x-text="d.kind"></span>
+                </div>
+                <div class="text-xs text-slate-400 flex items-center gap-3 mt-0.5">
+                  <span x-show="d.username" class="text-sky-400" x-text="d.username"></span>
+                  <span class="text-slate-500" x-text="'ID: ' + d.id"></span>
+                </div>
+              </div>
+              <div class="text-xs text-slate-400 shrink-0">
+                <span x-show="form.chat === d.input_value || form.chat === String(d.id)" class="text-sky-400 font-semibold">Selecionado ✓</span>
+              </div>
+            </button>
+          </template>
+        </div>
+      </section>
+
+      <!-- STEP 2: Media Type & Batch Options -->
+      <section class="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl space-y-4">
+        <div class="flex items-center gap-2.5">
+          <span class="w-6 h-6 rounded-full bg-sky-500/20 text-sky-400 border border-sky-500/30 text-xs font-bold flex items-center justify-center">2</span>
+          <h2 class="text-base font-semibold text-white">Filtro de Mídia e Desempenho</h2>
+        </div>
+
+        <!-- Media Type Cards -->
+        <div class="grid grid-cols-2 sm:grid-cols-5 gap-2.5">
+          <template x-for="mt in mediaTypeOptions" :key="mt.key">
+            <button type="button"
+                    @click="form.media_type = mt.key"
+                    class="p-3 rounded-xl border text-left transition flex flex-col justify-between gap-1.5"
+                    :class="form.media_type === mt.key
+                      ? 'bg-sky-500/15 border-sky-500 text-white shadow-sm shadow-sky-500/10'
+                      : 'bg-slate-950/70 border-slate-800 text-slate-400 hover:border-slate-700 hover:text-slate-200'">
+              <span class="text-lg" x-text="mt.icon"></span>
+              <div>
+                <div class="text-xs font-semibold leading-tight" x-text="mt.shortLabel"></div>
+                <div class="text-[10px] text-slate-500 mt-0.5" x-text="'/' + mt.folder"></div>
+              </div>
+            </button>
+          </template>
+        </div>
+
+        <!-- Concurrency & Limit -->
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-1">
+          <div>
+            <label class="block text-xs font-medium text-slate-400 mb-1">
+              Downloads simultâneos (<code class="text-slate-300">BATCH_SIZE</code>)
+            </label>
+            <input type="number" min="1" max="20" x-model.number="form.batch_size"
+                   class="w-full px-3.5 py-2 rounded-xl bg-slate-950 border border-slate-700 focus:border-sky-500 focus:outline-none text-sm text-white" />
+            <p class="text-[11px] text-slate-500 mt-1">Recomendado: 3 a 8 para evitar FloodWait do Telegram.</p>
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-slate-400 mb-1">
+              Limite de mensagens (<code class="text-slate-300">0 = sem limite</code>)
+            </label>
+            <input type="number" min="0" step="100" x-model.number="form.message_limit"
+                   class="w-full px-3.5 py-2 rounded-xl bg-slate-950 border border-slate-700 focus:border-sky-500 focus:outline-none text-sm text-white" />
+            <p class="text-[11px] text-slate-500 mt-1">Quantas mensagens recentes inspecionar no chat.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- STEP 3: Destination Path Picker (Host / Docker Volumes) -->
+      <section class="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl space-y-4">
+        <div class="flex items-center justify-between flex-wrap gap-2">
+          <div class="flex items-center gap-2.5">
+            <span class="w-6 h-6 rounded-full bg-sky-500/20 text-sky-400 border border-sky-500/30 text-xs font-bold flex items-center justify-center">3</span>
+            <div>
+              <h2 class="text-base font-semibold text-white">Pasta de Destino no Servidor</h2>
+              <p class="text-xs text-slate-400">Navegue pelas pastas reais onde a aplicação está rodando (Host ou Volumes Docker)</p>
+            </div>
+          </div>
+
+          <div class="flex items-center gap-2">
+            <span class="text-xs px-2 py-0.5 rounded border"
+                  :class="fs.writable ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300' : 'bg-rose-500/10 border-rose-500/30 text-rose-300'"
+                  x-text="fs.writable ? 'Permissão de Escrita OK' : 'Somente Leitura'">
+            </span>
+          </div>
+        </div>
+
+        <!-- Shortcuts (Roots & Volumes) -->
+        <div class="flex items-center gap-1.5 flex-wrap">
+          <span class="text-xs text-slate-400 mr-1">Atalhos:</span>
+          <template x-for="sc in fs.shortcuts" :key="sc.path">
+            <button type="button"
+                    @click="browsePath(sc.path)"
+                    class="text-xs px-2.5 py-1 rounded-lg border transition flex items-center gap-1"
+                    :class="form.dest_dir === sc.path
+                      ? 'bg-sky-500/20 border-sky-500/50 text-sky-200 font-medium'
+                      : 'bg-slate-950 border-slate-800 text-slate-300 hover:bg-slate-800'">
+              <span>📁</span>
+              <span x-text="sc.label"></span>
+            </button>
+          </template>
+        </div>
+
+        <!-- Manual Path Input + Append Subfolder Toggle -->
+        <div class="space-y-2">
+          <div class="flex gap-2">
+            <input type="text"
+                   x-model="form.dest_dir"
+                   @keydown.enter.prevent="browsePath(form.dest_dir)"
+                   placeholder="/caminho/para/salvar"
+                   class="flex-1 px-3.5 py-2 rounded-xl bg-slate-950 border border-slate-700 focus:border-sky-500 focus:outline-none text-sm font-mono text-sky-200" />
+            <button type="button"
+                    @click="browsePath(form.dest_dir)"
+                    class="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-medium text-slate-200 shrink-0 transition">
+              Ir para pasta
+            </button>
+          </div>
+
+          <div class="flex items-center justify-between flex-wrap gap-2 text-xs">
+            <label class="inline-flex items-center gap-2 text-slate-300 cursor-pointer select-none">
+              <input type="checkbox" x-model="form.append_type_folder" class="rounded bg-slate-950 border-slate-700 text-sky-500 focus:ring-sky-500" />
+              <span>Adicionar subpasta automática do tipo de mídia (<code class="text-sky-400" x-text="'/' + currentMediaFolder()"></code>)</span>
+            </label>
+
+            <label class="inline-flex items-center gap-1.5 text-slate-400 cursor-pointer select-none">
+              <input type="checkbox" x-model="fs.show_hidden" @change="browsePath(fs.current_path)" class="rounded bg-slate-950 border-slate-700 text-sky-500" />
+              <span>Mostrar pastas ocultas</span>
+            </label>
+          </div>
+
+          <!-- Effective Final Destination Display -->
+          <div class="p-2.5 rounded-xl bg-slate-950/90 border border-slate-800/90 flex items-center justify-between gap-2 text-xs">
+            <span class="text-slate-400 shrink-0">Salvar em:</span>
+            <code class="text-emerald-300 font-mono truncate flex-1 text-right" x-text="effectiveDestPath()"></code>
+          </div>
+        </div>
+
+        <!-- Interactive Folder Browser Box -->
+        <div class="border border-slate-800 rounded-xl bg-slate-950 overflow-hidden">
+          <!-- Breadcrumb Bar & New Folder Action -->
+          <div class="px-3 py-2 bg-slate-900/90 border-b border-slate-800 flex items-center justify-between gap-2 flex-wrap">
+            <div class="flex items-center gap-1 overflow-x-auto text-xs py-0.5 max-w-full">
+              <button type="button"
+                      x-show="fs.parent_path"
+                      @click="browsePath(fs.parent_path)"
+                      title="Subir um nível"
+                      class="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold mr-1 shrink-0">
+                ⬆️ ..
+              </button>
+              <template x-for="(crumb, idx) in fs.breadcrumbs" :key="crumb.path">
+                <div class="flex items-center gap-1 shrink-0">
+                  <span x-show="idx > 0" class="text-slate-600">/</span>
+                  <button type="button"
+                          @click="browsePath(crumb.path)"
+                          class="px-1.5 py-0.5 rounded hover:bg-slate-800 text-slate-300 hover:text-white font-mono transition"
+                          x-text="crumb.name === '/' ? 'raiz' : crumb.name"></button>
+                </div>
+              </template>
+            </div>
+
+            <button type="button"
+                    @click="showMkdir = !showMkdir"
+                    class="text-xs px-2.5 py-1 rounded-lg bg-sky-500/15 hover:bg-sky-500/25 text-sky-300 border border-sky-500/30 font-medium shrink-0 transition">
+              + Nova Pasta
+            </button>
+          </div>
+
+          <!-- Inline Create Folder Form -->
+          <div x-cloak x-show="showMkdir" class="p-2.5 bg-slate-900/60 border-b border-slate-800 flex items-center gap-2">
+            <input type="text"
+                   x-model="newFolderName"
+                   @keydown.enter.prevent="createFolder()"
+                   placeholder="Nome da nova pasta..."
+                   class="flex-1 px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white focus:border-sky-500 focus:outline-none" />
+            <button type="button" @click="createFolder()" class="px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold">
+              Criar
+            </button>
+            <button type="button" @click="showMkdir = false; newFolderName = ''" class="px-2.5 py-1.5 rounded-lg bg-slate-800 text-slate-400 text-xs">
+              Cancelar
+            </button>
+          </div>
+
+          <!-- Directories List -->
+          <div class="max-h-48 overflow-y-auto divide-y divide-slate-800/50">
+            <template x-if="fs.permission_error">
+              <div class="p-4 text-center text-xs text-rose-400">
+                Sem permissão para listar o conteúdo deste diretório no sistema operacional.
+              </div>
+            </template>
+
+            <template x-if="!fs.permission_error && fs.directories.length === 0">
+              <div class="p-4 text-center text-xs text-slate-500">
+                Nenhuma subpasta dentro de <code class="text-slate-400" x-text="fs.current_path"></code>.
+              </div>
+            </template>
+
+            <template x-for="dir in fs.directories" :key="dir.path">
+              <button type="button"
+                      @click="browsePath(dir.path)"
+                      class="w-full px-3.5 py-2 text-left flex items-center justify-between hover:bg-slate-800/60 transition group">
+                <div class="flex items-center gap-2.5 min-w-0">
+                  <span class="text-amber-400 group-hover:scale-110 transition">📁</span>
+                  <span class="text-xs font-mono text-slate-200 truncate" x-text="dir.name"></span>
+                </div>
+                <span class="text-[11px] text-slate-500 group-hover:text-sky-400">Abrir →</span>
+              </button>
+            </template>
+          </div>
+        </div>
+
+        <!-- Action Buttons: Preview & Start -->
+        <div class="pt-2 flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+          <button type="button"
+                  @click="previewMedia()"
+                  :disabled="previewLoading || isJobRunning() || !form.chat"
+                  class="sm:w-1/3 px-4 py-3 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-50 border border-slate-700 text-sm font-semibold text-slate-200 flex items-center justify-center gap-2 transition">
+            <svg class="w-4 h-4" :class="previewLoading && 'animate-spin'" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+              <path stroke-linecap="round" stroke-linejoin="round" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+            </svg>
+            <span x-text="previewLoading ? 'Escaneando...' : 'Escanear Mídias'"></span>
+          </button>
+
+          <button type="button"
+                  @click="startDownload()"
+                  :disabled="isJobRunning() || !form.chat || !state.telegram.authorized"
+                  class="flex-1 px-5 py-3 rounded-xl bg-gradient-to-r from-sky-500 to-blue-600 hover:from-sky-400 hover:to-blue-500 disabled:opacity-50 text-sm font-bold text-white shadow-lg shadow-sky-500/20 flex items-center justify-center gap-2 transition">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+            </svg>
+            <span>Iniciar Download em Lote</span>
+          </button>
+        </div>
+
+        <!-- Error Alert for Preview/Action -->
+        <div x-cloak x-show="actionError" class="p-3 rounded-xl bg-rose-950/60 border border-rose-500/40 text-xs text-rose-200 flex items-center justify-between">
+          <span x-text="actionError"></span>
+          <button @click="actionError = null" class="text-rose-400 hover:text-white ml-2">✕</button>
+        </div>
+
+        <!-- Preview Result Box -->
+        <div x-cloak x-show="previewResult" class="p-4 rounded-xl bg-sky-950/30 border border-sky-500/30 space-y-3">
+          <div class="flex items-center justify-between">
+            <div>
+              <h3 class="text-sm font-semibold text-white" x-text="'Pré-visualização: ' + (previewResult?.chat_title || '')"></h3>
+              <p class="text-xs text-slate-400" x-text="previewResult?.media_label + ' • Tamanho total estimado: ' + formatBytes(previewResult?.total_size_bytes || 0)"></p>
+            </div>
+            <button @click="previewResult = null" class="text-xs text-slate-400 hover:text-white">Fechar</button>
+          </div>
+
+          <div class="grid grid-cols-3 gap-2 text-center">
+            <div class="p-2 rounded-lg bg-slate-900/80 border border-slate-800">
+              <div class="text-base font-bold text-white" x-text="previewResult?.total_found || 0"></div>
+              <div class="text-[11px] text-slate-400">Encontradas</div>
+            </div>
+            <div class="p-2 rounded-lg bg-slate-900/80 border border-slate-800">
+              <div class="text-base font-bold text-emerald-400" x-text="previewResult?.to_download || 0"></div>
+              <div class="text-[11px] text-slate-400">Novas p/ Baixar</div>
+            </div>
+            <div class="p-2 rounded-lg bg-slate-900/80 border border-slate-800">
+              <div class="text-base font-bold text-sky-400" x-text="previewResult?.already_downloaded || 0"></div>
+              <div class="text-[11px] text-slate-400">Já no Disco</div>
+            </div>
+          </div>
+
+          <template x-if="previewResult?.samples?.length > 0">
+            <div class="text-xs space-y-1">
+              <div class="text-slate-400 font-medium">Exemplos de arquivos encontrados:</div>
+              <div class="max-h-28 overflow-y-auto space-y-1 pr-1">
+                <template x-for="s in previewResult.samples" :key="s.id">
+                  <div class="flex items-center justify-between text-[11px] bg-slate-900/70 px-2.5 py-1 rounded">
+                    <span class="font-mono text-slate-200 truncate mr-2" x-text="s.filename"></span>
+                    <span class="shrink-0 text-slate-400" x-text="formatBytes(s.size)"></span>
+                  </div>
+                </template>
+              </div>
+            </div>
+          </template>
+        </div>
+      </section>
+    </div>
+
+    <!-- RIGHT COLUMN: Real-Time Progress & Logs (5 cols on lg) -->
+    <div class="lg:col-span-5 space-y-6">
+
+      <!-- Overall Job Progress Card -->
+      <section class="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl space-y-4">
+        <div class="flex items-center justify-between gap-2">
+          <div>
+            <h2 class="text-base font-semibold text-white">Status da Execução</h2>
+            <p class="text-xs text-slate-400" x-text="state.job.info?.chat_title ? ('Chat: ' + state.job.info.chat_title) : 'Nenhum lote iniciado'"></p>
+          </div>
+
+          <div class="flex items-center gap-2">
+            <span class="text-xs px-2.5 py-1 rounded-full font-semibold border"
+                  :class="{
+                    'bg-slate-800 text-slate-300 border-slate-700': state.job.status === 'idle',
+                    'bg-amber-500/15 text-amber-300 border-amber-500/30 animate-pulse': state.job.status === 'scanning' || state.job.status === 'cancelling',
+                    'bg-sky-500/15 text-sky-300 border-sky-500/30': state.job.status === 'downloading',
+                    'bg-emerald-500/15 text-emerald-300 border-emerald-500/30': state.job.status === 'completed',
+                    'bg-orange-500/15 text-orange-300 border-orange-500/30': state.job.status === 'cancelled',
+                    'bg-rose-500/15 text-rose-300 border-rose-500/30': state.job.status === 'error'
+                  }"
+                  x-text="jobStatusLabel(state.job.status)">
+            </span>
+
+            <button x-cloak
+                    x-show="isJobRunning()"
+                    @click="cancelDownload()"
+                    class="text-xs px-3 py-1 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-semibold transition">
+              Parar
+            </button>
+          </div>
+        </div>
+
+        <!-- FloodWait Warning Banner -->
+        <div x-cloak x-show="state.job.flood_wait_seconds > 0"
+             class="p-3 rounded-xl bg-amber-950/60 border border-amber-500/40 text-xs text-amber-200 flex items-center justify-between">
+          <span>⏳ Limite de taxa do Telegram (FloodWait). Retomando automaticamente em:</span>
+          <strong class="font-mono text-sm text-amber-300" x-text="state.job.flood_wait_seconds + 's'"></strong>
+        </div>
+
+        <!-- Progress Bar -->
+        <div class="space-y-1.5">
+          <div class="flex justify-between text-xs">
+            <span class="text-slate-300 font-medium">
+              Progresso Geral:
+              <strong class="text-white" x-text="state.job.processed"></strong> de
+              <strong class="text-white" x-text="state.job.total_files"></strong> arquivos
+            </span>
+            <span class="text-sky-400 font-bold" x-text="state.job.percent + '%'"></span>
+          </div>
+          <div class="w-full h-3 rounded-full bg-slate-950 border border-slate-800 overflow-hidden">
+            <div class="h-full bg-gradient-to-r from-sky-500 to-emerald-400 transition-all duration-300"
+                 :style="'width: ' + Math.min(100, state.job.percent) + '%'"></div>
+          </div>
+          <div class="flex justify-between text-[11px] text-slate-500">
+            <span x-show="state.job.info?.dest_dir" class="truncate max-w-[70%]" x-text="'Destino: ' + state.job.info.dest_dir"></span>
+            <span x-text="'Tempo: ' + formatDuration(state.job.elapsed_seconds)"></span>
+          </div>
+        </div>
+
+        <!-- Counters Grid -->
+        <div class="grid grid-cols-3 gap-2.5 text-center pt-1">
+          <div class="p-3 rounded-xl bg-slate-950 border border-slate-800/90">
+            <div class="text-xl font-bold text-emerald-400" x-text="state.job.downloaded"></div>
+            <div class="text-[11px] text-slate-400">Baixados</div>
+          </div>
+          <div class="p-3 rounded-xl bg-slate-950 border border-slate-800/90">
+            <div class="text-xl font-bold text-sky-400" x-text="state.job.skipped"></div>
+            <div class="text-[11px] text-slate-400">Já Existiam</div>
+          </div>
+          <div class="p-3 rounded-xl bg-slate-950 border border-slate-800/90">
+            <div class="text-xl font-bold text-rose-400" x-text="state.job.failed_count"></div>
+            <div class="text-[11px] text-slate-400">Falhas</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Active File Workers -->
+      <section class="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl space-y-3">
+        <div class="flex items-center justify-between">
+          <h2 class="text-sm font-semibold text-white">Downloads Simultâneos Ativos</h2>
+          <span class="text-xs px-2 py-0.5 rounded bg-slate-800 text-sky-300 font-mono"
+                x-text="state.job.active_workers.length + ' ativos'"></span>
+        </div>
+
+        <template x-if="state.job.active_workers.length === 0">
+          <div class="p-6 rounded-xl bg-slate-950/60 border border-slate-800/60 text-center text-xs text-slate-500">
+            Nenhum arquivo sendo transferido neste momento.
+          </div>
+        </template>
+
+        <div class="space-y-2.5 max-h-72 overflow-y-auto pr-1">
+          <template x-for="w in state.job.active_workers" :key="w.message_id">
+            <div class="p-3 rounded-xl bg-slate-950 border border-slate-800 space-y-1.5">
+              <div class="flex items-center justify-between gap-2 text-xs">
+                <span class="font-mono text-slate-200 truncate" x-text="w.filename"></span>
+                <span class="text-sky-400 font-semibold shrink-0" x-text="w.percent + '%'"></span>
+              </div>
+              <div class="w-full h-2 rounded-full bg-slate-900 overflow-hidden">
+                <div class="h-full bg-sky-500 transition-all duration-200"
+                     :style="'width: ' + Math.min(100, w.percent) + '%'"></div>
+              </div>
+              <div class="flex items-center justify-between text-[11px] text-slate-400 font-mono">
+                <span x-text="formatBytes(w.current) + ' / ' + (w.total ? formatBytes(w.total) : '?')"></span>
+                <span class="text-emerald-400" x-text="formatBytes(w.speed_bps) + '/s'"></span>
+              </div>
+            </div>
+          </template>
+        </div>
+      </section>
+
+      <!-- Recent Activity Log -->
+      <section class="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl space-y-3">
+        <div class="flex items-center justify-between">
+          <h2 class="text-sm font-semibold text-white">Histórico Recente da Sessão</h2>
+          <span class="text-xs text-slate-500" x-text="state.job.recent_logs.length + ' eventos'"></span>
+        </div>
+
+        <div class="border border-slate-800 rounded-xl bg-slate-950 max-h-72 overflow-y-auto divide-y divide-slate-800/60 text-xs">
+          <template x-if="state.job.recent_logs.length === 0">
+            <div class="p-5 text-center text-slate-500">Os eventos de arquivos baixados e pulados aparecerão aqui.</div>
+          </template>
+
+          <template x-for="(log, idx) in state.job.recent_logs" :key="idx">
+            <div class="px-3 py-2 flex items-start gap-2.5">
+              <span class="mt-0.5 shrink-0"
+                    x-text="log.kind === 'success' ? '✅' : (log.kind === 'skipped' ? '↷' : (log.kind === 'error' ? '❌' : (log.kind === 'warning' ? '⚠️' : 'ℹ️')))">
+              </span>
+              <div class="min-w-0 flex-1">
+                <div class="flex items-center justify-between gap-2">
+                  <span class="font-mono text-slate-200 truncate" x-text="log.filename"></span>
+                  <span class="text-[10px] text-slate-500 shrink-0" x-text="log.time"></span>
+                </div>
+                <div class="text-[11px] flex items-center justify-between mt-0.5"
+                     :class="{
+                       'text-emerald-400': log.kind === 'success',
+                       'text-sky-400/80': log.kind === 'skipped',
+                       'text-rose-400': log.kind === 'error',
+                       'text-amber-300': log.kind === 'warning',
+                       'text-slate-400': log.kind === 'info'
+                     }">
+                  <span x-text="log.message"></span>
+                  <span x-show="log.size" class="text-slate-500 font-mono" x-text="formatBytes(log.size)"></span>
+                </div>
+              </div>
+            </div>
+          </template>
+        </div>
+      </section>
+
+    </div>
+  </main>
+
+  <script>
+    function tbmdApp() {
+      return {
+        wsConnected: false,
+        ws: null,
+        loadingDialogs: false,
+        dialogs: [],
+        dialogSearch: '',
+        previewLoading: false,
+        previewResult: null,
+        actionError: null,
+        showMkdir: false,
+        newFolderName: '',
+
+        mediaTypeOptions: [
+          { key: 'videos', shortLabel: 'Vídeos', folder: 'videos', icon: '🎬' },
+          { key: 'images', shortLabel: 'Imagens', folder: 'images', icon: '🖼️' },
+          { key: 'pdfs', shortLabel: 'PDFs', folder: 'pdfs', icon: '📄' },
+          { key: 'archives', shortLabel: 'ZIP / RAR', folder: 'archives', icon: '📦' },
+          { key: 'all', shortLabel: 'Todos', folder: 'all_media', icon: '🗂️' },
+        ],
+
+        form: {
+          chat: '',
+          media_type: 'videos',
+          batch_size: 5,
+          message_limit: 2000,
+          dest_dir: '',
+          append_type_folder: true,
+        },
+
+        fs: {
+          current_path: '',
+          parent_path: null,
+          writable: true,
+          permission_error: false,
+          show_hidden: false,
+          breadcrumbs: [],
+          directories: [],
+          shortcuts: [],
+        },
+
+        state: {
+          telegram: { connected: false, authorized: false, user: null, error: null, session_name: 'default_session' },
+          environment: { is_docker: false, default_download_dir: '', batch_size: 5, message_limit: 2000 },
+          job: {
+            status: 'idle',
+            error: null,
+            info: {},
+            total_files: 0,
+            downloaded: 0,
+            skipped: 0,
+            failed_count: 0,
+            processed: 0,
+            percent: 0,
+            elapsed_seconds: 0,
+            flood_wait_seconds: 0,
+            active_workers: [],
+            recent_logs: [],
+          }
+        },
+
+        async init() {
+          await this.fetchStatus();
+          await this.browsePath(this.form.dest_dir || this.state.environment.default_download_dir);
+          if (this.state.telegram.authorized) {
+            this.loadDialogs(false);
+          }
+          this.connectWebSocket();
+        },
+
+        async fetchStatus() {
+          try {
+            const res = await fetch('/api/status');
+            const data = await res.json();
+            this.applySnapshot(data, true);
+          } catch (e) {
+            console.error('Erro ao buscar status inicial:', e);
+          }
+        },
+
+        applySnapshot(data, isInitial = false) {
+          this.state = data;
+          if (isInitial) {
+            this.form.batch_size = data.environment.batch_size || 5;
+            this.form.message_limit = data.environment.message_limit ?? 2000;
+            if (!this.form.dest_dir) {
+              this.form.dest_dir = data.environment.default_download_dir;
+            }
+          }
+        },
+
+        connectWebSocket() {
+          const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+          const wsUrl = `${proto}//${window.location.host}/api/ws`;
+          this.ws = new WebSocket(wsUrl);
+
+          this.ws.onopen = () => {
+            this.wsConnected = true;
+          };
+
+          this.ws.onmessage = (event) => {
+            try {
+              const data = JSON.parse(event.data);
+              this.applySnapshot(data, false);
+            } catch (e) {
+              console.error('Erro no payload WS:', e);
+            }
+          };
+
+          this.ws.onclose = () => {
+            this.wsConnected = false;
+            setTimeout(() => this.connectWebSocket(), 2500);
+          };
+        },
+
+        async reconnectTelegram() {
+          this.actionError = null;
+          try {
+            const res = await fetch('/api/reconnect', { method: 'POST' });
+            const data = await res.json();
+            this.applySnapshot(data, false);
+            if (this.state.telegram.authorized) {
+              await this.loadDialogs(true);
+            }
+          } catch (e) {
+            this.actionError = 'Erro ao reconectar com o Telegram.';
+          }
+        },
+
+        async loadDialogs(refresh = false) {
+          if (!this.state.telegram.authorized) return;
+          this.loadingDialogs = true;
+          try {
+            const params = new URLSearchParams({ q: this.dialogSearch || '', refresh: refresh ? 'true' : 'false' });
+            const res = await fetch(`/api/dialogs?${params.toString()}`);
+            if (res.ok) {
+              const data = await res.json();
+              this.dialogs = data.dialogs || [];
+            }
+          } catch (e) {
+            console.error('Erro ao listar canais:', e);
+          } finally {
+            this.loadingDialogs = false;
+          }
+        },
+
+        selectDialog(d) {
+          this.form.chat = d.input_value;
+          this.previewResult = null;
+        },
+
+        currentMediaFolder() {
+          const found = this.mediaTypeOptions.find(m => m.key === this.form.media_type);
+          return found ? found.folder : 'all_media';
+        },
+
+        effectiveDestPath() {
+          const base = (this.form.dest_dir || this.state.environment.default_download_dir || '').replace(/\/+$/, '');
+          if (!this.form.append_type_folder) return base || '/';
+          const folder = this.currentMediaFolder();
+          if (base.toLowerCase().endsWith('/' + folder.toLowerCase())) return base;
+          return `${base}/${folder}`;
+        },
+
+        async browsePath(targetPath) {
+          try {
+            const params = new URLSearchParams();
+            if (targetPath) params.set('path', targetPath);
+            if (this.fs.show_hidden) params.set('show_hidden', 'true');
+            const res = await fetch(`/api/fs?${params.toString()}`);
+            if (res.ok) {
+              const data = await res.json();
+              this.fs = { ...this.fs, ...data };
+              this.form.dest_dir = data.requested_path || data.current_path;
+            }
+          } catch (e) {
+            console.error('Erro ao navegar diretório:', e);
+          }
+        },
+
+        async createFolder() {
+          if (!this.newFolderName.trim()) return;
+          this.actionError = null;
+          try {
+            const res = await fetch('/api/fs/mkdir', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                parent_path: this.fs.current_path,
+                folder_name: this.newFolderName.trim(),
+              }),
+            });
+            const data = await res.json();
+            if (!res.ok) {
+              this.actionError = data.detail || 'Não foi possível criar a pasta.';
+              return;
+            }
+            this.fs = { ...this.fs, ...data };
+            this.form.dest_dir = data.current_path;
+            this.newFolderName = '';
+            this.showMkdir = false;
+          } catch (e) {
+            this.actionError = 'Erro ao criar nova pasta.';
+          }
+        },
+
+        async previewMedia() {
+          if (!this.form.chat) return;
+          this.previewLoading = true;
+          this.actionError = null;
+          this.previewResult = null;
+          try {
+            const res = await fetch('/api/downloads/preview', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                chat: this.form.chat,
+                media_type: this.form.media_type,
+                message_limit: this.form.message_limit,
+                dest_dir: this.form.dest_dir,
+                append_type_folder: this.form.append_type_folder,
+              }),
+            });
+            const data = await res.json();
+            if (!res.ok) {
+              this.actionError = data.detail || 'Erro ao escanear chat.';
+              return;
+            }
+            this.previewResult = data;
+          } catch (e) {
+            this.actionError = 'Falha de comunicação ao escanear mídias.';
+          } finally {
+            this.previewLoading = false;
+          }
+        },
+
+        async startDownload() {
+          if (!this.form.chat) return;
+          this.actionError = null;
+          try {
+            const res = await fetch('/api/downloads/start', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                chat: this.form.chat,
+                media_type: this.form.media_type,
+                message_limit: this.form.message_limit,
+                batch_size: this.form.batch_size,
+                dest_dir: this.form.dest_dir,
+                append_type_folder: this.form.append_type_folder,
+              }),
+            });
+            const data = await res.json();
+            if (!res.ok) {
+              this.actionError = data.detail || 'Não foi possível iniciar o download.';
+              return;
+            }
+            this.applySnapshot(data, false);
+          } catch (e) {
+            this.actionError = 'Erro ao iniciar o job de download.';
+          }
+        },
+
+        async cancelDownload() {
+          try {
+            const res = await fetch('/api/downloads/cancel', { method: 'POST' });
+            if (res.ok) {
+              const data = await res.json();
+              this.applySnapshot(data, false);
+            }
+          } catch (e) {
+            console.error('Erro ao cancelar download:', e);
+          }
+        },
+
+        isJobRunning() {
+          return ['scanning', 'downloading', 'cancelling'].includes(this.state.job.status);
+        },
+
+        jobStatusLabel(status) {
+          const labels = {
+            idle: 'Aguardando',
+            scanning: 'Escaneando Chat...',
+            downloading: 'Baixando Mídias',
+            cancelling: 'Cancelando...',
+            completed: 'Concluído',
+            cancelled: 'Cancelado',
+            error: 'Erro',
+          };
+          return labels[status] || status;
+        },
+
+        formatBytes(bytes) {
+          if (!bytes || bytes <= 0) return '0 B';
+          const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+          const i = Math.floor(Math.log(bytes) / Math.log(1024));
+          return `${(bytes / Math.pow(1024, i)).toFixed(i > 1 ? 2 : 0)} ${units[i]}`;
+        },
+
+        formatDuration(sec) {
+          if (!sec || sec <= 0) return '0s';
+          const m = Math.floor(sec / 60);
+          const s = Math.floor(sec % 60);
+          return m > 0 ? `${m}m ${s}s` : `${s}s`;
+        }
+      };
+    }
+  </script>
+</body>
+</html>

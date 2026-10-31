@@ -1,0 +1,21 @@
+services:
+  tbmd-web:
+    build: .
+    container_name: telegram-media-downloader
+    restart: unless-stopped
+    ports:
+      - "${WEB_PORT:-8000}:8000"
+    env_file:
+      - .env
+    environment:
+      - DOWNLOAD_DIR=/downloads
+      - WEB_HOST=0.0.0.0
+      - WEB_PORT=8000
+    volumes:
+      # Sessão autenticada do Telethon (gere na 1ª vez com `python src/tbmd.py --list`)
+      - ./default_session.session:/app/default_session.session
+      # Pasta padrão de downloads mapeada para o host/homelab
+      - ./downloads:/downloads
+      # Exemplos de volumes extras do Homelab / NAS que aparecerão automaticamente na Web UI:
+      # - /mnt/storage/media:/media
+      # - /mnt/nas:/mnt/nas

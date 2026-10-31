@@ -314,7 +314,14 @@ def is_already_downloaded(state: dict, chat_key: str, message_id: int, dest_path
 class DownloadSession:
     """Shared state for one batch of downloads."""
 
-    def __init__(self, dest_dir: str, chat_key: str, state: dict, batch_size: int):
+    def __init__(
+        self,
+        dest_dir: str,
+        chat_key: str,
+        state: dict,
+        batch_size: int,
+        event_callback=None,
+    ):
         self.dest_dir = dest_dir
         self.chat_key = chat_key
         self.state = state
@@ -322,46 +329,133 @@ class DownloadSession:
         self.downloaded = 0
         self.skipped = 0
         self.failed = []
+        self.cancelled = False
+        self.event_callback = event_callback
+
+    def emit(self, event_type: str, **payload):
+        if self.event_callback:
+            try:
+                self.event_callback(event_type, payload)
+            except Exception:
+                pass
 
 
-async def download_file(message, session: DownloadSession, files_progress: Progress, overall_progress: Progress, overall_task):
+async def download_file(
+    message,
+    session: DownloadSession,
+    files_progress: Progress | None = None,
+    overall_progress: Progress | None = None,
+    overall_task=None,
+):
     """Download a single media message with progress tracking and state recording."""
+    if session.cancelled:
+        return
+
     async with session.semaphore:
+        if session.cancelled:
+            return
+
         filename, _ = get_media_filename(message)
         dest_path = os.path.join(session.dest_dir, filename)
 
         # Check for resuming / skipping
         if is_already_downloaded(session.state, session.chat_key, message.id, dest_path):
             session.skipped += 1
-            console.print(f"[cyan]↷[/] [dim]Já baixado:[/] {escape(filename)}")
-            overall_progress.advance(overall_task)
+            session.emit(
+                "file_skipped",
+                message_id=message.id,
+                filename=filename,
+                dest_path=dest_path,
+            )
+            if files_progress is not None:
+                console.print(f"[cyan]↷[/] [dim]Já baixado:[/] {escape(filename)}")
+            if overall_progress is not None and overall_task is not None:
+                overall_progress.advance(overall_task)
             return
 
         file_size = message.file.size if message.file and message.file.size else None
-        task = files_progress.add_task(escape(shorten(filename)), total=file_size)
+        task = (
+            files_progress.add_task(escape(shorten(filename)), total=file_size)
+            if files_progress is not None
+            else None
+        )
+        session.emit(
+            "file_start",
+            message_id=message.id,
+            filename=filename,
+            total=file_size,
+        )
 
         def on_progress(current, total):
-            files_progress.update(task, completed=current, total=total or None)
+            if session.cancelled:
+                raise asyncio.CancelledError("Download cancelado pelo usuário.")
+            if files_progress is not None and task is not None:
+                files_progress.update(task, completed=current, total=total or None)
+            session.emit(
+                "file_progress",
+                message_id=message.id,
+                filename=filename,
+                current=current,
+                total=total or file_size,
+            )
 
         try:
             try:
                 await message.download_media(file=dest_path, progress_callback=on_progress)
             except FloodWaitError as e:
-                console.print(f"[yellow]Limite de requisições do Telegram. Aguardando {e.seconds}s...[/]")
+                session.emit(
+                    "flood_wait",
+                    message_id=message.id,
+                    filename=filename,
+                    seconds=e.seconds,
+                )
+                if files_progress is not None:
+                    console.print(f"[yellow]Limite de requisições do Telegram. Aguardando {e.seconds}s...[/]")
                 await asyncio.sleep(e.seconds)
+                if session.cancelled:
+                    raise asyncio.CancelledError("Download cancelado pelo usuário.")
                 # Retry once after FloodWait
                 await message.download_media(file=dest_path, progress_callback=on_progress)
 
             record_download(session.state, session.chat_key, message.id, dest_path)
             save_state(session.state)
             session.downloaded += 1
-            console.print(f"[green]✓[/] {escape(filename)}")
+            final_size = os.path.getsize(dest_path) if os.path.exists(dest_path) else (file_size or 0)
+            session.emit(
+                "file_complete",
+                message_id=message.id,
+                filename=filename,
+                dest_path=dest_path,
+                size=final_size,
+            )
+            if files_progress is not None:
+                console.print(f"[green]✓[/] {escape(filename)}")
+        except asyncio.CancelledError:
+            if os.path.exists(dest_path):
+                try:
+                    os.remove(dest_path)
+                except OSError:
+                    pass
+            session.emit(
+                "file_cancelled",
+                message_id=message.id,
+                filename=filename,
+            )
         except Exception as e:
             session.failed.append((message.id, str(e)))
-            console.print(f"[red]✗ Erro ao baixar a mensagem {message.id}:[/] {escape(str(e))}")
+            session.emit(
+                "file_error",
+                message_id=message.id,
+                filename=filename,
+                error=str(e),
+            )
+            if files_progress is not None:
+                console.print(f"[red]✗ Erro ao baixar a mensagem {message.id}:[/] {escape(str(e))}")
         finally:
-            files_progress.remove_task(task)
-            overall_progress.advance(overall_task)
+            if files_progress is not None and task is not None:
+                files_progress.remove_task(task)
+            if overall_progress is not None and overall_task is not None:
+                overall_progress.advance(overall_task)
 
 
 async def download_media_list(messages, session: DownloadSession):
@@ -520,6 +614,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-y", "--yes", action="store_true", help="não pergunta nada que tenha valor padrão")
     parser.add_argument("--list", action="store_true", help="lista seus canais e grupos e sai")
     parser.add_argument("--search", metavar="TERMO", help="busca chats pelo nome e sai")
+    parser.add_argument("--web", action="store_true", help="inicia a interface web (homelab UI)")
+    parser.add_argument("--host", default=os.getenv("WEB_HOST", "0.0.0.0"), help="host do servidor web (padrão: 0.0.0.0)")
+    parser.add_argument("--port", type=int, default=int(os.getenv("WEB_PORT", "8000")), help="porta do servidor web (padrão: 8000)")
     return parser
 
 
@@ -633,6 +730,15 @@ async def main():
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        parsed_args = build_parser().parse_args()
+        if parsed_args.web:
+            import uvicorn
+            # Ensure project root is in sys.path when invoked as `python src/tbmd.py --web`
+            project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            if project_root not in sys.path:
+                sys.path.insert(0, project_root)
+            uvicorn.run("src.web:app", host=parsed_args.host, port=parsed_args.port, reload=False)
+        else:
+            asyncio.run(main())
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrompido pelo usuário.[/]")
