@@ -157,6 +157,71 @@ class TestWebEndpoints(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json()["job"]["recent_logs"], [])
 
+    def test_queue_operations_and_multi_media_types(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            orig_jobs_file = web.JOBS_FILE
+            web.JOBS_FILE = os.path.join(tmpdir, "jobs_history.json")
+            try:
+                web.manager.jobs = []
+                web.manager.client = MagicMock()
+                web.manager.authorized = True
+                # Pause queue so jobs stay in `queued` state for inspection and reordering
+                pause_resp = self.client.post("/api/queue/pause", json={"paused": True})
+                self.assertEqual(pause_resp.status_code, 200)
+                self.assertTrue(pause_resp.json()["queue"]["paused"])
+
+                r1 = self.client.post(
+                    "/api/downloads/start",
+                    json={
+                        "chat": "@canal_um",
+                        "chat_title": "Canal Um",
+                        "media_types": ["videos", "pdfs"],
+                        "dest_dir": tmpdir,
+                        "append_type_folder": False,
+                    },
+                )
+                self.assertEqual(r1.status_code, 200)
+
+                r2 = self.client.post(
+                    "/api/downloads/start",
+                    json={
+                        "chat": "@canal_dois",
+                        "chat_title": "Canal Dois",
+                        "media_types": ["images"],
+                        "dest_dir": tmpdir,
+                        "append_type_folder": True,
+                    },
+                )
+                self.assertEqual(r2.status_code, 200)
+                snap = r2.json()
+                self.assertEqual(snap["queue"]["queued_count"], 2)
+                job1_id = snap["jobs"][0]["id"]
+                job2_id = snap["jobs"][1]["id"]
+                self.assertEqual(snap["jobs"][0]["media_types"], ["videos", "pdfs"])
+                self.assertEqual(snap["jobs"][0]["queue_position"], 1)
+                self.assertEqual(snap["jobs"][1]["queue_position"], 2)
+
+                # Move second job up to position #1
+                move_resp = self.client.post(f"/api/jobs/{job2_id}/move-up")
+                self.assertEqual(move_resp.status_code, 200)
+                moved_jobs = move_resp.json()["jobs"]
+                self.assertEqual(moved_jobs[0]["id"], job2_id)
+                self.assertEqual(moved_jobs[0]["queue_position"], 1)
+
+                # Cancel job1 (marks it as cancelled) and then clear completed/cancelled jobs
+                cancel_resp = self.client.post(f"/api/jobs/{job1_id}/cancel")
+                self.assertEqual(cancel_resp.status_code, 200)
+
+                clear_resp = self.client.post("/api/jobs/clear-completed")
+                self.assertEqual(clear_resp.status_code, 200)
+                remaining_ids = [j["id"] for j in clear_resp.json()["jobs"]]
+                self.assertEqual(remaining_ids, [job2_id])
+            finally:
+                web.manager.queue_paused = False
+                web.manager.jobs = []
+                web.JOBS_FILE = orig_jobs_file
+
+
 
 if __name__ == "__main__":
     unittest.main()

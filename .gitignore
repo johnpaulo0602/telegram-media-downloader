@@ -69,6 +69,7 @@ venv.bak/
 
 # Download state & downloaded media
 download_state.json
+jobs_history.json
 downloads/
 *.log
 

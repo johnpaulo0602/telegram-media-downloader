@@ -208,42 +208,62 @@ def parse_chat_input(raw_input: str):
     return cleaned
 
 
-def filter_media_messages(messages, media_type: str) -> list:
-    """Keep only the messages that match the chosen media type."""
+VIDEO_EXTS = (".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v")
+IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".gif", ".heic", ".bmp")
+
+
+def _matches_single_type(msg, media_type: str, strict_unfiltered: bool = False) -> bool:
+    """Return True if a single message matches `media_type`."""
+    if not getattr(msg, "media", None):
+        return False
+
+    doc = getattr(msg, "document", None)
+    mime = (getattr(doc, "mime_type", None) or "").lower() if doc else ""
+    file_obj = getattr(msg, "file", None)
+    fname = (getattr(file_obj, "name", None) or "").lower() if file_obj else ""
+
     if media_type == "pdfs":
-        return [
-            msg for msg in messages
-            if msg.document and (
-                msg.document.mime_type == "application/pdf"
-                or (msg.file and msg.file.name and msg.file.name.lower().endswith(".pdf"))
-            )
-        ]
+        return bool(doc and (mime == "application/pdf" or fname.endswith(".pdf")))
+
     if media_type == "archives":
-        return [
-            msg for msg in messages
-            if msg.document and (
-                msg.document.mime_type in ARCHIVE_MIMES
-                or (msg.file and msg.file.name and msg.file.name.lower().endswith(ARCHIVE_EXTS))
-            )
-        ]
+        return bool(doc and (mime in ARCHIVE_MIMES or fname.endswith(ARCHIVE_EXTS)))
+
     if media_type == "audios":
+        return bool(
+            getattr(msg, "audio", None)
+            or getattr(msg, "voice", None)
+            or (doc and (mime.startswith("audio/") or fname.endswith(AUDIO_EXTS)))
+        )
+
+    if media_type == "videos":
+        if getattr(msg, "video", None) or mime.startswith("video/") or fname.endswith(VIDEO_EXTS):
+            return True
+        return not strict_unfiltered and doc is None and not getattr(msg, "photo", None)
+
+    if media_type == "images":
+        if getattr(msg, "photo", None) or mime.startswith("image/") or fname.endswith(IMAGE_EXTS):
+            return True
+        return not strict_unfiltered and doc is None and not getattr(msg, "video", None)
+
+    if media_type == "all":
+        return file_obj is not None
+
+    return True
+
+
+def filter_media_messages(messages, media_type: str | list[str]) -> list:
+    """Keep only the messages that match the chosen media type(s)."""
+    if isinstance(media_type, (list, tuple, set)):
+        types_list = [t for t in media_type if t in MEDIA_TYPES]
+        if not types_list or "all" in types_list:
+            return [msg for msg in messages if getattr(msg, "media", None) and getattr(msg, "file", None) is not None]
+        strict = len(types_list) > 1
         return [
             msg for msg in messages
-            if getattr(msg, "audio", None)
-            or getattr(msg, "voice", None)
-            or (
-                msg.document
-                and (
-                    (getattr(msg.document, "mime_type", None) or "").startswith("audio/")
-                    or (msg.file and msg.file.name and msg.file.name.lower().endswith(AUDIO_EXTS))
-                )
-            )
+            if any(_matches_single_type(msg, t, strict_unfiltered=strict) for t in types_list)
         ]
-    if media_type == "all":
-        # For all types: ensure message has actual downloadable media
-        return [msg for msg in messages if msg.media and msg.file is not None]
-    # Images and videos are already filtered by Telegram
-    return [msg for msg in messages if msg.media]
+
+    return [msg for msg in messages if _matches_single_type(msg, media_type, strict_unfiltered=False)]
 
 
 def normalize_text(text: str) -> str:

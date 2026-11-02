@@ -228,6 +228,14 @@ class TestMediaFiltering(unittest.TestCase):
         text_only = make_message(media=False)
         self.assertEqual(tbmd.filter_media_messages([with_file, text_only], "all"), [with_file])
 
+    def test_multiple_media_types_filter(self):
+        video_msg = make_message("video/mp4", "aula.mp4")
+        pdf_msg = make_message("application/pdf", "apostila.pdf")
+        zip_msg = make_message("application/zip", "exercicios.zip")
+        result = tbmd.filter_media_messages([video_msg, pdf_msg, zip_msg], ["videos", "pdfs"])
+        self.assertEqual(result, [video_msg, pdf_msg])
+
+
 
 class TestCliArgs(unittest.TestCase):
     def test_overrides(self):

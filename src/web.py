@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import shutil
 import sys
@@ -11,7 +12,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from telethon import TelegramClient, utils
 
 # Ensure `src.tbmd` is importable whether invoked as `python src/web.py` or `uvicorn src.web:app`
@@ -20,6 +21,8 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 import src.tbmd as tbmd
+
+JOBS_FILE = os.path.join(PROJECT_ROOT, "jobs_history.json")
 
 
 def is_running_in_docker() -> bool:
@@ -163,6 +166,31 @@ def browse_directory(target_path: str | None, default_dir: str, show_hidden: boo
     }
 
 
+def normalize_media_types(media_type: str | None, media_types: list[str] | None) -> list[str]:
+    """Validate and normalize single or multiple media_type inputs into a non-empty list of keys."""
+    raw_list: list[str] = []
+    if media_types:
+        raw_list = [m.strip() for m in media_types if m and m.strip()]
+    elif media_type and media_type.strip():
+        raw_list = [media_type.strip()]
+    else:
+        raw_list = ["videos"]
+
+    valid: list[str] = []
+    for item in raw_list:
+        if item not in tbmd.MEDIA_TYPES:
+            raise HTTPException(status_code=400, detail=f"Tipo de mídia inválido: '{item}'.")
+        if item not in valid:
+            valid.append(item)
+
+    if not valid:
+        raise HTTPException(status_code=400, detail="Selecione ao menos um tipo de mídia válido.")
+
+    if "all" in valid:
+        return ["all"]
+    return valid
+
+
 class MkdirRequest(BaseModel):
     parent_path: str
     folder_name: str
@@ -171,6 +199,7 @@ class MkdirRequest(BaseModel):
 class PreviewRequest(BaseModel):
     chat: str
     media_type: str = "videos"
+    media_types: list[str] | None = None
     message_limit: int | None = None
     dest_dir: str | None = None
     append_type_folder: bool = True
@@ -178,15 +207,21 @@ class PreviewRequest(BaseModel):
 
 class StartDownloadRequest(BaseModel):
     chat: str
+    chat_title: str | None = None
     media_type: str = "videos"
+    media_types: list[str] | None = None
     message_limit: int | None = None
     batch_size: int | None = None
     dest_dir: str | None = None
     append_type_folder: bool = True
 
 
+class QueuePauseRequest(BaseModel):
+    paused: bool | None = None
+
+
 class WebDownloadManager:
-    """Manages the TelegramClient connection, active download job, and WebSocket subscribers."""
+    """Manages the TelegramClient connection, FIFO download job queue, and WebSocket subscribers."""
 
     def __init__(self):
         self.config: dict | None = None
@@ -198,14 +233,21 @@ class WebDownloadManager:
         self.dialogs_cache: list = []
         self.dialogs_updated_at: float = 0.0
 
-        # Active or most recent job state
+        # Multi-job queue & history state
+        self.jobs: list[dict[str, Any]] = []
+        self.job_counter: int = 1000
+        self.queue_paused: bool = False
+        self.current_job_id: str | None = None
+        self.queue_runner_task: asyncio.Task | None = None
+
+        # Active or most recent job state (preserved for compatibility + live tracking)
         self.job_status: str = "idle"  # idle, scanning, downloading, cancelling, completed, cancelled, error
         self.job_error: str | None = None
         self.job_info: dict[str, Any] = {}
         self.active_Session: tbmd.DownloadSession | None = None
         self.active_task: asyncio.Task | None = None
         self.active_workers: dict[int, dict[str, Any]] = {}
-        self.recent_logs: deque = deque(maxlen=150)
+        self.recent_logs: deque = deque(maxlen=250)
         self.flood_wait_until: float = 0.0
         self.started_at: float | None = None
         self.finished_at: float | None = None
@@ -216,6 +258,71 @@ class WebDownloadManager:
         self.ws_clients: set[WebSocket] = set()
         self._last_broadcast: float = 0.0
         self._broadcast_pending: bool = False
+
+        self.load_jobs_history()
+
+    def load_jobs_history(self):
+        """Load persisted jobs history from disk if available."""
+        if not os.path.exists(JOBS_FILE):
+            return
+        try:
+            with open(JOBS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                loaded_jobs = data.get("jobs", [])
+                self.job_counter = int(data.get("job_counter", 1000))
+                self.queue_paused = bool(data.get("queue_paused", False))
+            elif isinstance(data, list):
+                loaded_jobs = data
+            else:
+                loaded_jobs = []
+
+            cleaned_jobs = []
+            for job in loaded_jobs:
+                if not isinstance(job, dict) or not job.get("id"):
+                    continue
+                # Any job interrupted mid-flight when server stopped is marked cancelled
+                if job.get("status") in ("scanning", "downloading", "cancelling"):
+                    job["status"] = "cancelled"
+                    job["error"] = "Interrompido por reinicialização do servidor"
+                    job["active_workers"] = []
+                    job["total_speed_bps"] = 0
+                cleaned_jobs.append(job)
+            self.jobs = cleaned_jobs
+        except ( json.JSONDecodeError, OSError, ValueError ):
+            self.jobs = []
+
+    def save_jobs_history(self):
+        """Persist jobs list and queue counter to disk."""
+        try:
+            serializable_jobs = []
+            for j in self.jobs[-100:]:  # Keep up to 100 recent jobs
+                copy_j = dict(j)
+                # Ensure logs list is bounded when saving
+                copy_j["recent_logs"] = list(copy_j.get("recent_logs", []))[:150]
+                copy_j["active_workers"] = [] if copy_j.get("status") not in ("scanning", "downloading") else copy_j.get("active_workers", [])
+                serializable_jobs.append(copy_j)
+            payload = {
+                "job_counter": self.job_counter,
+                "queue_paused": self.queue_paused,
+                "jobs": serializable_jobs,
+            }
+            with open(JOBS_FILE, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2, ensure_ascii=False)
+        except OSError:
+            pass
+
+    def _next_job_id(self) -> str:
+        self.job_counter += 1
+        return f"TK-{self.job_counter}"
+
+    def _get_job(self, job_id: str | None) -> dict[str, Any] | None:
+        if not job_id:
+            return None
+        for job in self.jobs:
+            if job.get("id") == job_id:
+                return job
+        return None
 
     async def initialize(self):
         """Load config and connect TelegramClient if credentials exist."""
@@ -249,6 +356,8 @@ class WebDownloadManager:
                     "username": getattr(me, "username", None),
                     "phone": getattr(me, "phone", None),
                 }
+                # Resume queued jobs if any exist and queue is not paused
+                self._ensure_queue_processor()
             else:
                 self.user_info = None
         except Exception as e:
@@ -261,15 +370,21 @@ class WebDownloadManager:
             self.active_Session.cancelled = True
         if self.active_task and not self.active_task.done():
             self.active_task.cancel()
+        if self.queue_runner_task and not self.queue_runner_task.done():
+            self.queue_runner_task.cancel()
         if self.client:
             try:
                 await self.client.disconnect()
             except Exception:
                 pass
 
-    def resolve_destination(self, custom_dir: str | None, media_type: str, append_type_folder: bool) -> str:
+    def resolve_destination(self, custom_dir: str | None, media_type: str | list[str], append_type_folder: bool) -> str:
         base_default = (self.config or {}).get("download_dir", "downloads")
-        media_folder = tbmd.MEDIA_TYPES.get(media_type, tbmd.MEDIA_TYPES["all"])["folder"]
+        if isinstance(media_type, list):
+            effective_key = media_type[0] if len(media_type) == 1 else "all"
+        else:
+            effective_key = media_type
+        media_folder = tbmd.MEDIA_TYPES.get(effective_key, tbmd.MEDIA_TYPES["all"])["folder"]
 
         if custom_dir and custom_dir.strip():
             base = os.path.abspath(os.path.expanduser(custom_dir.strip()))
@@ -282,8 +397,71 @@ class WebDownloadManager:
                 return os.path.join(base, media_folder)
         return base
 
+    def _sync_active_job_metrics(self):
+        """Update the currently active job dict in `self.jobs` with live metrics."""
+        job = self._get_job(self.current_job_id)
+        if not job:
+            return
+
+        session = self.active_Session
+        downloaded = session.downloaded if session else job.get("downloaded", 0)
+        skipped = session.skipped if session else job.get("skipped", 0)
+        failed_count = len(session.failed) if session else job.get("failed_count", 0)
+        processed = downloaded + skipped + failed_count
+
+        now = time.time()
+        elapsed = 0.0
+        if self.started_at:
+            end_ref = self.finished_at or now
+            elapsed = max(0.0, end_ref - self.started_at)
+
+        flood_remaining = max(0, int(self.flood_wait_until - now)) if self.flood_wait_until > now else 0
+        active_list = list(self.active_workers.values())
+        total_speed_bps = round(sum(w.get("speed_bps", 0) for w in active_list))
+        in_flight_bytes = sum(w.get("current", 0) for w in active_list)
+        bytes_downloaded = self.completed_bytes + in_flight_bytes
+
+        total_files = self.total_files
+        percent = round((processed / total_files) * 100, 1) if total_files > 0 else 0.0
+
+        peak_speed = max(job.get("peak_speed_bps", 0), total_speed_bps)
+        avg_speed = round(bytes_downloaded / elapsed) if elapsed > 0.5 and bytes_downloaded > 0 else total_speed_bps
+
+        total_size_bytes = job.get("total_size_bytes", 0)
+        eta_seconds = None
+        if self.job_status == "downloading":
+            remaining_bytes = max(0, total_size_bytes - bytes_downloaded)
+            speed_ref = total_speed_bps or avg_speed
+            if remaining_bytes > 0 and speed_ref > 0:
+                eta_seconds = int(remaining_bytes / speed_ref)
+            elif total_files > processed and elapsed > 1 and processed > 0:
+                rate_files = processed / elapsed
+                eta_seconds = int((total_files - processed) / rate_files)
+
+        job.update({
+            "status": self.job_status,
+            "error": self.job_error,
+            "total_files": total_files,
+            "downloaded": downloaded,
+            "skipped": skipped,
+            "failed_count": failed_count,
+            "processed": processed,
+            "percent": percent,
+            "elapsed_seconds": round(elapsed, 1),
+            "flood_wait_seconds": flood_remaining,
+            "total_speed_bps": total_speed_bps if self.job_status == "downloading" else 0,
+            "peak_speed_bps": peak_speed,
+            "avg_speed_bps": avg_speed,
+            "bytes_downloaded": bytes_downloaded,
+            "eta_seconds": eta_seconds,
+            "active_workers": active_list if self.job_status in ("scanning", "downloading") else [],
+            "recent_logs": list(self.recent_logs),
+        })
+
     def get_snapshot(self) -> dict[str, Any]:
-        """Return a JSON-serializable snapshot of the server & job state."""
+        """Return a JSON-serializable snapshot of the server, queue, and jobs state."""
+        self._sync_active_job_metrics()
+
         session = self.active_Session
         downloaded = session.downloaded if session else self.job_info.get("downloaded", 0)
         skipped = session.skipped if session else self.job_info.get("skipped", 0)
@@ -297,13 +475,37 @@ class WebDownloadManager:
             elapsed = max(0.0, end_ref - self.started_at)
 
         flood_remaining = max(0, int(self.flood_wait_until - now)) if self.flood_wait_until > now else 0
-
         default_dir = os.path.abspath(os.path.expanduser((self.config or {}).get("download_dir", "downloads")))
 
         active_list = list(self.active_workers.values())
         total_speed_bps = sum(w.get("speed_bps", 0) for w in active_list)
         in_flight_bytes = sum(w.get("current", 0) for w in active_list)
         bytes_downloaded = self.completed_bytes + in_flight_bytes
+
+        # Assign 1-based queue_position to queued jobs in FIFO order
+        queue_pos = 0
+        running_count = 0
+        queued_count = 0
+        completed_count = 0
+        failed_count_jobs = 0
+
+        serialized_jobs = []
+        for j in self.jobs:
+            st = j.get("status", "queued")
+            if st in ("scanning", "downloading", "cancelling"):
+                running_count += 1
+                j["queue_position"] = None
+            elif st == "queued":
+                queued_count += 1
+                queue_pos += 1
+                j["queue_position"] = queue_pos
+            elif st == "completed":
+                completed_count += 1
+                j["queue_position"] = None
+            elif st in ("error", "cancelled"):
+                failed_count_jobs += 1
+                j["queue_position"] = None
+            serialized_jobs.append(j)
 
         return {
             "telegram": {
@@ -323,7 +525,18 @@ class WebDownloadManager:
                     for k, v in tbmd.MEDIA_TYPES.items()
                 ],
             },
+            "queue": {
+                "paused": self.queue_paused,
+                "running_count": running_count,
+                "queued_count": queued_count,
+                "completed_count": completed_count,
+                "failed_count": failed_count_jobs,
+                "total_count": len(serialized_jobs),
+                "current_job_id": self.current_job_id,
+            },
+            "jobs": serialized_jobs,
             "job": {
+                "id": self.current_job_id,
                 "status": self.job_status,
                 "error": self.job_error,
                 "info": self.job_info,
@@ -345,6 +558,7 @@ class WebDownloadManager:
     async def broadcast_state(self, force: bool = False):
         """Send current state snapshot to all connected WebSocket clients, throttled to ~10Hz."""
         if not self.ws_clients:
+            self._sync_active_job_metrics()
             return
         now = time.time()
         if not force and (now - self._last_broadcast) < 0.12:
@@ -370,14 +584,22 @@ class WebDownloadManager:
         if self._broadcast_pending:
             await self.broadcast_state(force=True)
 
-    def _add_log(self, kind: str, filename: str, message: str, size: int | None = None):
-        self.recent_logs.appendleft({
+    def _add_log(self, kind: str, filename: str, message: str, size: int | None = None, job_id: str | None = None):
+        entry = {
             "time": time.strftime("%H:%M:%S"),
             "kind": kind,  # success, skipped, error, warning, info
             "filename": filename,
             "message": message,
             "size": size,
-        })
+        }
+        self.recent_logs.appendleft(entry)
+        target_id = job_id or self.current_job_id
+        job = self._get_job(target_id)
+        if job is not None:
+            logs = job.setdefault("recent_logs", [])
+            logs.insert(0, entry)
+            if len(logs) > 250:
+                del logs[250:]
 
     def _on_download_event(self, event_type: str, payload: dict[str, Any]):
         """Callback invoked by `tbmd.download_file` during batch execution."""
@@ -507,8 +729,8 @@ class WebDownloadManager:
     async def preview_media(self, req: PreviewRequest) -> dict[str, Any]:
         if not self.client or not self.authorized:
             raise HTTPException(status_code=400, detail="Sessão do Telegram não está autenticada.")
-        if req.media_type not in tbmd.MEDIA_TYPES:
-            raise HTTPException(status_code=400, detail="Tipo de mídia inválido.")
+
+        media_types = normalize_media_types(req.media_type, req.media_types)
 
         try:
             channel = await tbmd.resolve_channel(self.client, req.chat)
@@ -518,17 +740,19 @@ class WebDownloadManager:
         if channel is None:
             raise HTTPException(status_code=400, detail="Informe um canal, grupo, username ou ID válido.")
 
-        media_info = tbmd.MEDIA_TYPES[req.media_type]
         limit = req.message_limit if (req.message_limit and req.message_limit > 0) else None
-        filter_class = media_info["filter"]
+        if len(media_types) == 1:
+            filter_class = tbmd.MEDIA_TYPES[media_types[0]]["filter"]
+        else:
+            filter_class = None
 
         messages = await self.client.get_messages(
             channel,
             filter=filter_class() if filter_class else None,
             limit=limit,
         )
-        media_messages = tbmd.filter_media_messages(messages, req.media_type)
-        dest_dir = self.resolve_destination(req.dest_dir, req.media_type, req.append_type_folder)
+        media_messages = tbmd.filter_media_messages(messages, media_types)
+        dest_dir = self.resolve_destination(req.dest_dir, media_types, req.append_type_folder)
         state = tbmd.load_state()
         chat_id = str(getattr(channel, "id", req.chat))
         chat_title = utils.get_display_name(channel) or str(req.chat)
@@ -553,11 +777,14 @@ class WebDownloadManager:
                     "already_downloaded": already,
                 })
 
+        media_labels = [tbmd.MEDIA_TYPES[k]["label"] for k in media_types]
         return {
             "chat_title": chat_title,
             "chat_id": chat_id,
-            "media_type": req.media_type,
-            "media_label": media_info["label"],
+            "media_type": media_types[0],
+            "media_types": media_types,
+            "media_label": " + ".join(media_labels),
+            "media_labels": media_labels,
             "dest_dir": dest_dir,
             "total_found": len(media_messages),
             "already_downloaded": already_count,
@@ -567,56 +794,151 @@ class WebDownloadManager:
         }
 
     async def start_download_job(self, req: StartDownloadRequest) -> dict[str, Any]:
+        """Create a new job in the FIFO queue and start execution immediately if idle."""
         if not self.client or not self.authorized:
             raise HTTPException(status_code=400, detail="Sessão do Telegram não está autenticada.")
-        if self.job_status in ("scanning", "downloading"):
-            raise HTTPException(status_code=409, detail="Já existe um download em andamento.")
-        if req.media_type not in tbmd.MEDIA_TYPES:
-            raise HTTPException(status_code=400, detail="Tipo de mídia inválido.")
 
+        media_types = normalize_media_types(req.media_type, req.media_types)
+        media_labels = [tbmd.MEDIA_TYPES[k]["label"] for k in media_types]
+
+        dest_dir = self.resolve_destination(req.dest_dir, media_types, req.append_type_folder)
+        batch_size = max(1, req.batch_size or (self.config or {}).get("batch_size", 5))
+        limit = req.message_limit if req.message_limit is not None else (self.config or {}).get("message_limit", 2000)
+        effective_limit = limit if (limit and limit > 0) else None
+
+        job_id = self._next_job_id()
+        now = time.time()
+        initial_title = (req.chat_title or "").strip() or req.chat.strip()
+
+        new_job: dict[str, Any] = {
+            "id": job_id,
+            "chat_input": req.chat.strip(),
+            "chat_title": initial_title,
+            "chat_id": None,
+            "media_type": media_types[0],
+            "media_types": media_types,
+            "media_label": " + ".join(media_labels),
+            "media_labels": media_labels,
+            "dest_dir": dest_dir,
+            "append_type_folder": req.append_type_folder,
+            "batch_size": batch_size,
+            "message_limit": effective_limit,
+            "status": "queued",
+            "error": None,
+            "total_files": 0,
+            "downloaded": 0,
+            "skipped": 0,
+            "failed_count": 0,
+            "processed": 0,
+            "percent": 0.0,
+            "bytes_downloaded": 0,
+            "total_size_bytes": 0,
+            "total_speed_bps": 0,
+            "peak_speed_bps": 0,
+            "avg_speed_bps": 0,
+            "eta_seconds": None,
+            "elapsed_seconds": 0.0,
+            "flood_wait_seconds": 0,
+            "created_at": now,
+            "started_at": None,
+            "finished_at": None,
+            "active_workers": [],
+            "recent_logs": [
+                {
+                    "time": time.strftime("%H:%M:%S"),
+                    "kind": "info",
+                    "filename": initial_title,
+                    "message": f"Job {job_id} adicionado à fila ({' + '.join(media_labels)})",
+                    "size": None,
+                }
+            ],
+        }
+        self.jobs.append(new_job)
+        self.save_jobs_history()
+
+        # Start or wake up the FIFO queue processor
+        self._ensure_queue_processor()
+        # Yield briefly so if the queue was idle, the job transitions to `scanning` immediately
+        await asyncio.sleep(0)
+        await self.broadcast_state(force=True)
+        return self.get_snapshot()
+
+    def _ensure_queue_processor(self):
+        if self.queue_runner_task is None or self.queue_runner_task.done():
+            try:
+                loop = asyncio.get_running_loop()
+                self.queue_runner_task = loop.create_task(self._process_queue())
+            except RuntimeError:
+                pass
+
+    async def _process_queue(self):
+        """Process queued jobs sequentially in FIFO order."""
+        while True:
+            if self.queue_paused or not self.client or not self.authorized:
+                break
+
+            next_job = None
+            for job in self.jobs:
+                if job.get("status") == "queued":
+                    next_job = job
+                    break
+
+            if next_job is None:
+                break
+
+            await self._execute_job(next_job)
+            self.save_jobs_history()
+
+    async def _execute_job(self, job: dict[str, Any]):
+        job_id = job["id"]
+        self.current_job_id = job_id
         self.job_status = "scanning"
         self.job_error = None
         self.active_workers.clear()
         self.recent_logs.clear()
+        for existing_log in reversed(job.get("recent_logs", [])):
+            self.recent_logs.appendleft(existing_log)
+
         self.started_at = time.time()
         self.finished_at = None
         self.total_files = 0
         self.completed_bytes = 0
         self.flood_wait_until = 0.0
 
-        dest_dir = self.resolve_destination(req.dest_dir, req.media_type, req.append_type_folder)
-        batch_size = max(1, req.batch_size or (self.config or {}).get("batch_size", 5))
-        limit = req.message_limit if req.message_limit is not None else (self.config or {}).get("message_limit", 2000)
-        effective_limit = limit if (limit and limit > 0) else None
+        job["status"] = "scanning"
+        job["error"] = None
+        job["started_at"] = self.started_at
+        job["finished_at"] = None
 
         self.job_info = {
-            "chat_input": req.chat,
-            "chat_title": req.chat,
-            "chat_id": None,
-            "media_type": req.media_type,
-            "media_label": tbmd.MEDIA_TYPES[req.media_type]["label"],
-            "dest_dir": dest_dir,
-            "batch_size": batch_size,
-            "message_limit": effective_limit,
+            "id": job_id,
+            "chat_input": job["chat_input"],
+            "chat_title": job["chat_title"],
+            "chat_id": job.get("chat_id"),
+            "media_type": job["media_type"],
+            "media_types": job["media_types"],
+            "media_label": job["media_label"],
+            "media_labels": job["media_labels"],
+            "dest_dir": job["dest_dir"],
+            "batch_size": job["batch_size"],
+            "message_limit": job["message_limit"],
             "downloaded": 0,
             "skipped": 0,
             "failed_count": 0,
         }
         await self.broadcast_state(force=True)
 
-        self.active_task = asyncio.create_task(
-            self._run_download_pipeline(req.chat, req.media_type, dest_dir, batch_size, effective_limit)
-        )
-        return self.get_snapshot()
+        self.active_task = asyncio.current_task()
+        await self._run_download_pipeline(job)
+        self.active_task = None
 
-    async def _run_download_pipeline(
-        self,
-        chat_input: str,
-        media_type: str,
-        dest_dir: str,
-        batch_size: int,
-        effective_limit: int | None,
-    ):
+    async def _run_download_pipeline(self, job: dict[str, Any]):
+        chat_input = job["chat_input"]
+        media_types = job.get("media_types") or [job.get("media_type", "videos")]
+        dest_dir = job["dest_dir"]
+        batch_size = job["batch_size"]
+        effective_limit = job["message_limit"]
+
         try:
             channel = await tbmd.resolve_channel(self.client, chat_input)
             if channel is None:
@@ -624,24 +946,39 @@ class WebDownloadManager:
 
             chat_title = utils.get_display_name(channel) or str(chat_input)
             chat_id = str(getattr(channel, "id", chat_input))
+            username = getattr(channel, "username", None)
+            if username:
+                job["username"] = f"@{username}"
+            job["chat_title"] = chat_title
+            job["chat_id"] = chat_id
             self.job_info["chat_title"] = chat_title
             self.job_info["chat_id"] = chat_id
+
             self._add_log("info", chat_title, f"Buscando mensagens no chat (limite: {effective_limit or 'ilimitado'})...")
             await self.broadcast_state(force=True)
 
-            media_info = tbmd.MEDIA_TYPES[media_type]
-            filter_class = media_info["filter"]
+            if len(media_types) == 1:
+                filter_class = tbmd.MEDIA_TYPES[media_types[0]]["filter"]
+            else:
+                filter_class = None
+
             messages = await self.client.get_messages(
                 channel,
                 filter=filter_class() if filter_class else None,
                 limit=effective_limit,
             )
-            media_messages = tbmd.filter_media_messages(messages, media_type)
+            media_messages = tbmd.filter_media_messages(messages, media_types)
             self.total_files = len(media_messages)
+            total_size_bytes = sum(
+                (m.file.size if getattr(m, "file", None) and getattr(m.file, "size", None) else 0)
+                for m in media_messages
+            )
+            job["total_size_bytes"] = total_size_bytes
 
             if not media_messages:
                 self.job_status = "completed"
                 self.finished_at = time.time()
+                job["finished_at"] = self.finished_at
                 self._add_log("warning", chat_title, "Nenhuma mídia encontrada para o filtro selecionado.")
                 await self.broadcast_state(force=True)
                 return
@@ -669,6 +1006,7 @@ class WebDownloadManager:
             self.job_info["failed_count"] = len(self.active_Session.failed)
             self.active_workers.clear()
             self.finished_at = time.time()
+            job["finished_at"] = self.finished_at
 
             if self.active_Session.cancelled:
                 self.job_status = "cancelled"
@@ -686,24 +1024,137 @@ class WebDownloadManager:
         except asyncio.CancelledError:
             self.active_workers.clear()
             self.finished_at = time.time()
+            job["finished_at"] = self.finished_at
             self.job_status = "cancelled"
             self._add_log("warning", chat_input, "Job cancelado pelo usuário.")
             await self.broadcast_state(force=True)
         except Exception as e:
             self.active_workers.clear()
             self.finished_at = time.time()
+            job["finished_at"] = self.finished_at
             self.job_status = "error"
             self.job_error = str(e)
             self._add_log("error", chat_input, f"Falha no job: {e}")
             await self.broadcast_state(force=True)
+        finally:
+            self._sync_active_job_metrics()
+            self.active_Session = None
 
-    async def cancel_job(self) -> dict[str, Any]:
-        if self.active_Session:
-            self.active_Session.cancelled = True
-        if self.job_status in ("scanning", "downloading"):
-            self.job_status = "cancelling"
-        if self.active_task and not self.active_task.done():
-            self.active_task.cancel()
+    async def cancel_job(self, job_id: str | None = None) -> dict[str, Any]:
+        """Cancel a specific job by ID (queued or running) or the currently active job."""
+        target_id = job_id or self.current_job_id
+        job = self._get_job(target_id)
+
+        if job and job.get("status") == "queued":
+            job["status"] = "cancelled"
+            job["finished_at"] = time.time()
+            self._add_log("warning", job.get("chat_title", ""), "Job removido da fila pelo usuário.", job_id=job["id"])
+            self.save_jobs_history()
+            await self.broadcast_state(force=True)
+            return self.get_snapshot()
+
+        if not job_id or job_id == self.current_job_id:
+            if self.active_Session:
+                self.active_Session.cancelled = True
+            if self.job_status in ("scanning", "downloading"):
+                self.job_status = "cancelling"
+            if self.active_task and not self.active_task.done():
+                self.active_task.cancel()
+            await asyncio.sleep(0)
+            self.save_jobs_history()
+            await self.broadcast_state(force=True)
+        return self.get_snapshot()
+
+    async def delete_job(self, job_id: str) -> dict[str, Any]:
+        """Delete a job from the queue/history. If currently running, cancel it first."""
+        job = self._get_job(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job não encontrado.")
+        if job_id == self.current_job_id and self.job_status in ("scanning", "downloading", "cancelling"):
+            await self.cancel_job(job_id)
+        self.jobs = [j for j in self.jobs if j.get("id") != job_id]
+        if self.current_job_id == job_id:
+            self.current_job_id = None
+            self.job_status = "idle"
+        self.save_jobs_history()
+        await self.broadcast_state(force=True)
+        return self.get_snapshot()
+
+    async def move_job_up(self, job_id: str) -> dict[str, Any]:
+        """Move a queued job one position earlier among queued jobs."""
+        idx = next((i for i, j in enumerate(self.jobs) if j.get("id") == job_id), None)
+        if idx is None:
+            raise HTTPException(status_code=404, detail="Job não encontrado.")
+        if self.jobs[idx].get("status") != "queued":
+            raise HTTPException(status_code=400, detail="Apenas jobs na fila podem ser reordenados.")
+
+        # Find the closest preceding queued job
+        prev_queued_idx = None
+        for i in range(idx - 1, -1, -1):
+            if self.jobs[i].get("status") == "queued":
+                prev_queued_idx = i
+                break
+
+        if prev_queued_idx is not None:
+            self.jobs[prev_queued_idx], self.jobs[idx] = self.jobs[idx], self.jobs[prev_queued_idx]
+            self.save_jobs_history()
+            await self.broadcast_state(force=True)
+        return self.get_snapshot()
+
+    async def retry_job(self, job_id: str) -> dict[str, Any]:
+        """Re-queue a completed, cancelled, or failed job."""
+        job = self._get_job(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job não encontrado.")
+        if job.get("status") in ("scanning", "downloading", "cancelling"):
+            raise HTTPException(status_code=400, detail="Este job já está em execução.")
+
+        job.update({
+            "status": "queued",
+            "error": None,
+            "downloaded": 0,
+            "skipped": 0,
+            "failed_count": 0,
+            "processed": 0,
+            "percent": 0.0,
+            "bytes_downloaded": 0,
+            "total_speed_bps": 0,
+            "eta_seconds": None,
+            "elapsed_seconds": 0.0,
+            "started_at": None,
+            "finished_at": None,
+            "active_workers": [],
+        })
+        self._add_log("info", job.get("chat_title", ""), "Job re-enfileirado para execução.", job_id=job_id)
+        self.save_jobs_history()
+        self._ensure_queue_processor()
+        await asyncio.sleep(0)
+        await self.broadcast_state(force=True)
+        return self.get_snapshot()
+
+    async def clear_completed_jobs(self) -> dict[str, Any]:
+        """Remove all finished (completed, cancelled, error) jobs from the list."""
+        self.jobs = [
+            j for j in self.jobs
+            if j.get("status") in ("queued", "scanning", "downloading", "cancelling")
+        ]
+        if self.current_job_id and not self._get_job(self.current_job_id):
+            self.current_job_id = None
+            self.job_status = "idle"
+        self.save_jobs_history()
+        await self.broadcast_state(force=True)
+        return self.get_snapshot()
+
+    async def toggle_queue_pause(self, paused: bool | None = None) -> dict[str, Any]:
+        """Pause or resume the FIFO queue."""
+        if paused is None:
+            self.queue_paused = not self.queue_paused
+        else:
+            self.queue_paused = bool(paused)
+        self.save_jobs_history()
+        if not self.queue_paused:
+            self._ensure_queue_processor()
+            await asyncio.sleep(0)
         await self.broadcast_state(force=True)
         return self.get_snapshot()
 
@@ -720,7 +1171,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Telegram Batch Media Downloader — Homelab UI",
-    version="1.0.0",
+    version="2.0.0",
     lifespan=lifespan,
 )
 
@@ -795,35 +1246,86 @@ async def api_cancel_downloads():
     return await manager.cancel_job()
 
 
-@app.post("/api/logs/clear")
-async def api_clear_logs():
-    manager.recent_logs.clear()
+@app.post("/api/jobs/clear-completed")
+async def api_clear_completed_jobs():
+    return await manager.clear_completed_jobs()
+
+
+@app.post("/api/jobs/{job_id}/cancel")
+async def api_cancel_job_by_id(job_id: str):
+    return await manager.cancel_job(job_id)
+
+
+@app.post("/api/jobs/{job_id}/delete")
+async def api_delete_job_by_id(job_id: str):
+    return await manager.delete_job(job_id)
+
+
+@app.post("/api/jobs/{job_id}/move-up")
+async def api_move_job_up(job_id: str):
+    return await manager.move_job_up(job_id)
+
+
+@app.post("/api/jobs/{job_id}/retry")
+async def api_retry_job(job_id: str):
+    return await manager.retry_job(job_id)
+
+
+@app.post("/api/jobs/{job_id}/logs/clear")
+async def api_clear_job_logs(job_id: str):
+    job = manager._get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job não encontrado.")
+    job["recent_logs"] = []
+    if job_id == manager.current_job_id:
+        manager.recent_logs.clear()
+    manager.save_jobs_history()
     await manager.broadcast_state(force=True)
     return manager.get_snapshot()
 
 
-@app.websocket("/api/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    await websocket.accept()
-    manager.ws_clients.add(websocket)
+@app.post("/api/queue/pause")
+async def api_toggle_queue_pause(req: QueuePauseRequest | None = None):
+    paused = req.paused if req is not None else None
+    return await manager.toggle_queue_pause(paused)
+
+
+@app.post("/api/logs/clear")
+async def api_clear_logs():
+    manager.recent_logs.clear()
+    if manager.current_job_id:
+        job = manager._get_job(manager.current_job_id)
+        if job:
+            job["recent_logs"] = []
+    await manager.broadcast_state(force=True)
+    return manager.get_snapshot()
+
+
+@app.websocket("/ws")
+async def websocket_endpoint(ws: WebSocket):
+    await ws.accept()
+    manager.ws_clients.add(ws)
     try:
-        await websocket.send_json(manager.get_snapshot())
+        await ws.send_json(manager.get_snapshot())
         while True:
-            # Keep connection alive and respond to optional client pings
-            msg = await websocket.receive_text()
+            msg = await ws.receive_text()
             if msg == "ping":
-                await websocket.send_json(manager.get_snapshot())
+                await ws.send_json(manager.get_snapshot())
     except WebSocketDisconnect:
         pass
     except Exception:
         pass
     finally:
-        manager.ws_clients.discard(websocket)
+        manager.ws_clients.discard(ws)
 
 
-if __name__ == "__main__":
+def main():
     import uvicorn
 
     host = os.getenv("WEB_HOST", "0.0.0.0")
-    port = int(os.getenv("WEB_PORT", "8000"))
+    port = int(os.getenv("WEB_PORT", "8080"))
     uvicorn.run("src.web:app", host=host, port=port, reload=False)
+
+
+if __name__ == "__main__":
+    main()
