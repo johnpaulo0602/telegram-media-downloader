@@ -957,6 +957,266 @@
       return true;
     }
 
+    function setTextIfChanged(el, text) {
+      if (!el) return;
+      const str = String(text ?? '');
+      if (el.textContent !== str) {
+        el.textContent = str;
+      }
+    }
+
+    function setHtmlIfChanged(el, html) {
+      if (!el) return;
+      if (el.dataset.lastHtml !== html) {
+        el.innerHTML = html;
+        el.dataset.lastHtml = html;
+      }
+    }
+
+    function createJobRowElement(jobId) {
+      const tr = document.createElement('tr');
+      tr.dataset.jobId = jobId;
+      tr.className = 'hover:bg-bgElevated/40 transition-colors cursor-pointer';
+      tr.addEventListener('click', (e) => {
+        if (e.target.closest('button')) return;
+        openTelemetryDrawer(jobId);
+      });
+
+      tr.innerHTML = `
+        <td class="py-4 pl-5 pr-3">
+          <div class="flex items-center space-x-3">
+            <div data-role="avatar" class="w-9 h-9 rounded-lg border flex items-center justify-center font-display font-bold text-xs shrink-0">
+              TG
+            </div>
+            <div class="min-w-0">
+              <div data-role="title" class="font-medium text-white truncate max-w-[240px]"></div>
+              <div class="text-xs font-mono text-slate-400 truncate max-w-[240px]">
+                <span data-role="chat-input"></span> • <span class="text-slate-500">Job #<span data-role="job-id"></span></span>
+              </div>
+            </div>
+          </div>
+        </td>
+        <td class="py-4 px-3">
+          <div data-role="media-badges" class="flex flex-wrap gap-1"></div>
+        </td>
+        <td class="py-4 px-3">
+          <div class="space-y-1.5">
+            <div class="flex justify-between text-xs font-mono">
+              <span data-role="prog-top-left" class="text-white font-medium"></span>
+              <span data-role="prog-top-right" class="text-telegram font-semibold"></span>
+            </div>
+            <div data-role="prog-track" class="w-full h-2 bg-slate-800 rounded-full overflow-hidden">
+              <div data-role="prog-bar" class="bg-gradient-to-r from-telegram to-indigoAccent h-full rounded-full transition-all duration-300" style="width: 0%"></div>
+            </div>
+            <div class="flex justify-between text-[10px] font-mono text-slate-400 gap-2">
+              <span data-role="prog-bot-left" class="truncate"></span>
+              <span data-role="prog-bot-right" class="shrink-0"></span>
+            </div>
+          </div>
+        </td>
+        <td class="py-4 px-3">
+          <div data-role="tp-main" class="font-mono text-xs text-emerald-400 font-semibold"></div>
+          <div data-role="tp-sub" class="text-[10px] font-mono text-slate-400"></div>
+        </td>
+        <td class="py-4 px-3" data-role="status-cell"></td>
+        <td class="py-4 px-3">
+          <span data-role="dest" class="font-mono text-xs text-slate-300 bg-bgBase px-2.5 py-1 rounded border border-borderSubtle inline-block max-w-[210px] truncate"></span>
+        </td>
+        <td class="py-4 pl-3 pr-5 text-right">
+          <div class="flex items-center justify-end space-x-1.5">
+            <button type="button" onclick="event.stopPropagation(); openLogsModal('${escapeHtml(jobId)}')" class="px-2.5 py-1.5 rounded-lg text-xs font-mono bg-bgBase hover:bg-bgElevated text-slate-300 hover:text-white border border-borderSubtle flex items-center space-x-1 transition-colors cursor-pointer" title="Abrir Console de Logs">
+              <svg class="w-3.5 h-3.5 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path>
+              </svg>
+              <span>Logs</span>
+            </button>
+            <button type="button" onclick="event.stopPropagation(); openTelemetryDrawer('${escapeHtml(jobId)}')" class="px-2.5 py-1.5 rounded-lg text-xs font-medium bg-telegram/15 hover:bg-telegram/25 text-telegram border border-telegram/30 flex items-center space-x-1 transition-colors cursor-pointer" title="Inspecionar Workers &amp; Telemetria">
+              <span>Detalhes</span>
+            </button>
+            <div data-role="extra-actions" class="flex items-center space-x-1.5"></div>
+          </div>
+        </td>
+      `;
+      return tr;
+    }
+
+    function updateJobRowElement(tr, job) {
+      const st = job.status || 'queued';
+      const isActive = ['scanning', 'downloading', 'cancelling'].includes(st);
+      const isQueued = st === 'queued';
+      const isCompleted = st === 'completed';
+      const isFailed = st === 'error' || st === 'cancelled';
+
+      const desiredRowCls = isActive
+        ? 'bg-telegram/[0.05] hover:bg-telegram/[0.09] border-l-2 border-l-telegram transition-colors cursor-pointer'
+        : 'hover:bg-bgElevated/40 transition-colors cursor-pointer';
+      if (tr.className !== desiredRowCls) {
+        tr.className = desiredRowCls;
+      }
+
+      const initials = (job.chat_title || 'TG').replace(/[^a-zA-Z0-9]/g, '').slice(0, 2).toUpperCase() || 'TG';
+      const avatarTone = isActive
+        ? 'bg-telegram/20 border-telegram/40 text-telegram'
+        : (isCompleted ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400' : (isFailed ? 'bg-rose-500/10 border-rose-500/30 text-rose-400' : 'bg-slate-800 border-slate-700 text-slate-300'));
+      const avatarEl = tr.querySelector('[data-role="avatar"]');
+      const fullAvatarCls = `w-9 h-9 rounded-lg border flex items-center justify-center font-display font-bold text-xs shrink-0 ${avatarTone}`;
+      if (avatarEl.className !== fullAvatarCls) avatarEl.className = fullAvatarCls;
+      setTextIfChanged(avatarEl, initials);
+
+      setTextIfChanged(tr.querySelector('[data-role="title"]'), job.chat_title || job.chat_input);
+      setTextIfChanged(tr.querySelector('[data-role="chat-input"]'), job.chat_input);
+      setTextIfChanged(tr.querySelector('[data-role="job-id"]'), job.id);
+
+      setHtmlIfChanged(
+        tr.querySelector('[data-role="media-badges"]'),
+        renderMediaBadges(job.media_types || [job.media_type])
+      );
+
+      // Progress cell updates in-place
+      const topLeft = tr.querySelector('[data-role="prog-top-left"]');
+      const topRight = tr.querySelector('[data-role="prog-top-right"]');
+      const progBar = tr.querySelector('[data-role="prog-bar"]');
+      const botLeft = tr.querySelector('[data-role="prog-bot-left"]');
+      const botRight = tr.querySelector('[data-role="prog-bot-right"]');
+
+      if (isActive) {
+        const pct = Number(job.percent || 0).toFixed(1);
+        const filesLabel = job.total_files > 0 ? `${job.processed || 0} / ${job.total_files} arq.` : 'Escaneando canal...';
+        const etaLabel = job.eta_seconds ? `ETA: ${formatShortEta(job.eta_seconds)}` : `Tempo: ${formatDuration(job.elapsed_seconds)}`;
+        topLeft.className = 'text-white font-medium';
+        topRight.className = 'text-telegram font-semibold';
+        setTextIfChanged(topLeft, filesLabel);
+        setTextIfChanged(topRight, `${pct}%`);
+        const barCls = 'bg-gradient-to-r from-telegram to-indigoAccent h-full rounded-full transition-all duration-300';
+        if (progBar.className !== barCls) progBar.className = barCls;
+        const wStr = `${Math.min(100, Number(pct))}%`;
+        if (progBar.style.width !== wStr) progBar.style.width = wStr;
+        botLeft.className = 'truncate text-slate-400';
+        setTextIfChanged(botLeft, `${formatBytes(job.bytes_downloaded || 0)}${job.total_size_bytes ? ' / ' + formatBytes(job.total_size_bytes) : ''}`);
+        setTextIfChanged(botRight, etaLabel);
+      } else if (isQueued) {
+        topLeft.className = 'text-slate-400';
+        topRight.className = 'text-slate-400';
+        setTextIfChanged(topLeft, 'Aguardando slot');
+        setTextIfChanged(topRight, '0%');
+        if (progBar.style.width !== '0%') progBar.style.width = '0%';
+        botLeft.className = 'truncate text-slate-500';
+        setTextIfChanged(botLeft, `Limite: ${job.message_limit ? job.message_limit + ' msgs' : 'Histórico completo'}`);
+        setTextIfChanged(botRight, '');
+      } else if (isCompleted) {
+        const totalF = job.total_files || job.processed || 0;
+        topLeft.className = 'text-slate-300';
+        topRight.className = 'text-emerald-400 font-semibold';
+        setTextIfChanged(topLeft, `${totalF} / ${totalF} arq.`);
+        setTextIfChanged(topRight, '100%');
+        const barCls = 'bg-emerald-500 h-full rounded-full transition-all duration-300';
+        if (progBar.className !== barCls) progBar.className = barCls;
+        if (progBar.style.width !== '100%') progBar.style.width = '100%';
+        botLeft.className = 'truncate text-slate-400';
+        setTextIfChanged(botLeft, `${formatBytes(job.bytes_downloaded || job.total_size_bytes || 0)} (${job.skipped || 0} pulados)`);
+        setTextIfChanged(botRight, `Tempo: ${formatDuration(job.elapsed_seconds)}`);
+      } else {
+        const pct = Number(job.percent || 0).toFixed(1);
+        topLeft.className = 'text-slate-300';
+        topRight.className = 'text-rose-400';
+        setTextIfChanged(topLeft, `${job.processed || 0} / ${job.total_files || 0} arq.`);
+        setTextIfChanged(topRight, `${pct}%`);
+        const barCls = 'bg-rose-500 h-full rounded-full transition-all duration-300';
+        if (progBar.className !== barCls) progBar.className = barCls;
+        const wStr = `${Math.min(100, Number(pct))}%`;
+        if (progBar.style.width !== wStr) progBar.style.width = wStr;
+        botLeft.className = 'truncate text-rose-400';
+        setTextIfChanged(botLeft, job.error || (st === 'cancelled' ? 'Interrompido pelo usuário' : 'Falha na execução'));
+        setTextIfChanged(botRight, '');
+      }
+
+      // Throughput cell updates in-place
+      const tpMain = tr.querySelector('[data-role="tp-main"]');
+      const tpSub = tr.querySelector('[data-role="tp-sub"]');
+      if (isActive) {
+        const activeW = (job.active_workers || []).length;
+        tpMain.className = 'font-mono text-xs text-emerald-400 font-semibold';
+        tpSub.className = 'text-[10px] font-mono text-slate-400';
+        setTextIfChanged(tpMain, formatSpeed(job.total_speed_bps));
+        setTextIfChanged(tpSub, `${activeW}/${job.batch_size || 5} workers ativos`);
+      } else if (isQueued) {
+        tpMain.className = 'font-mono text-xs text-slate-500';
+        tpSub.className = 'text-[10px] font-mono text-slate-500';
+        setTextIfChanged(tpMain, '-- MB/s');
+        setTextIfChanged(tpSub, `${job.batch_size || 5} workers config.`);
+      } else {
+        tpMain.className = 'font-mono text-xs text-slate-400';
+        tpSub.className = 'text-[10px] font-mono text-slate-500';
+        setTextIfChanged(tpMain, job.avg_speed_bps ? `Média: ${formatSpeed(job.avg_speed_bps)}` : '-- MB/s');
+        setTextIfChanged(tpSub, `${job.downloaded || 0} baixados`);
+      }
+
+      // Status badge (only re-rendered when status or queue_position changes)
+      let statusBadge = '';
+      if (st === 'scanning') {
+        statusBadge = `<span class="inline-flex items-center space-x-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-telegram/15 text-telegram border border-telegram/30"><span class="w-1.5 h-1.5 rounded-full bg-telegram animate-ping"></span><span>Escaneando</span></span>`;
+      } else if (st === 'downloading') {
+        statusBadge = `<span class="inline-flex items-center space-x-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-telegram/15 text-telegram border border-telegram/30"><span class="w-1.5 h-1.5 rounded-full bg-telegram animate-ping"></span><span>Baixando</span></span>`;
+      } else if (st === 'cancelling') {
+        statusBadge = `<span class="inline-flex items-center space-x-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-amber-950/60 text-amber-300 border border-amber-800/50"><span>Cancelando...</span></span>`;
+      } else if (isQueued) {
+        statusBadge = `<span class="inline-flex items-center space-x-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-amber-950/50 text-amber-300 border border-amber-800/50"><span class="w-1.5 h-1.5 rounded-full bg-amber-400"></span><span>Na Fila #${job.queue_position || 1}</span></span>`;
+      } else if (isCompleted) {
+        statusBadge = `<span class="inline-flex items-center space-x-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-950/50 text-emerald-300 border border-emerald-800/50"><span class="w-1.5 h-1.5 rounded-full bg-emerald-400"></span><span>Concluído</span></span>`;
+      } else if (st === 'cancelled') {
+        statusBadge = `<span class="inline-flex items-center space-x-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-slate-800 text-slate-300 border border-slate-700"><span>Cancelado</span></span>`;
+      } else {
+        statusBadge = `<span class="inline-flex items-center space-x-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-rose-950/60 text-rose-300 border border-rose-800/60"><span class="w-1.5 h-1.5 rounded-full bg-rose-400"></span><span>Falha</span></span>`;
+      }
+      setHtmlIfChanged(tr.querySelector('[data-role="status-cell"]'), statusBadge);
+
+      const destEl = tr.querySelector('[data-role="dest"]');
+      setTextIfChanged(destEl, job.dest_dir || '');
+      if (destEl.title !== (job.dest_dir || '')) destEl.title = job.dest_dir || '';
+
+      // Extra actions (only updated if action group changes: active vs queued vs finished)
+      const actionGroup = isActive ? 'active' : (isQueued ? 'queued' : 'finished');
+      const extraContainer = tr.querySelector('[data-role="extra-actions"]');
+      if (extraContainer.dataset.actionGroup !== actionGroup) {
+        extraContainer.dataset.actionGroup = actionGroup;
+        if (isActive) {
+          extraContainer.innerHTML = `
+            <button type="button" onclick="event.stopPropagation(); cancelJobById('${escapeHtml(job.id)}')" class="p-1.5 rounded-lg bg-rose-950/40 hover:bg-rose-900/60 text-rose-300 border border-rose-800/50 transition-colors cursor-pointer" title="Parar / Cancelar Job">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+              </svg>
+            </button>
+          `;
+        } else if (isQueued) {
+          extraContainer.innerHTML = `
+            <button type="button" onclick="event.stopPropagation(); moveJobUp('${escapeHtml(job.id)}')" class="p-1.5 rounded-lg bg-bgBase hover:bg-bgElevated text-slate-400 hover:text-white border border-borderSubtle transition-colors cursor-pointer" title="Subir prioridade na fila">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 15l7-7 7 7"></path>
+              </svg>
+            </button>
+            <button type="button" onclick="event.stopPropagation(); deleteJobById('${escapeHtml(job.id)}')" class="p-1.5 rounded-lg bg-bgBase hover:bg-rose-950/50 text-slate-400 hover:text-rose-300 border border-borderSubtle transition-colors cursor-pointer" title="Remover da fila">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+              </svg>
+            </button>
+          `;
+        } else {
+          extraContainer.innerHTML = `
+            <button type="button" onclick="event.stopPropagation(); retryJobById('${escapeHtml(job.id)}')" class="p-1.5 rounded-lg bg-bgBase hover:bg-bgElevated text-slate-400 hover:text-telegram border border-borderSubtle transition-colors cursor-pointer" title="Re-enfileirar Job">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+              </svg>
+            </button>
+            <button type="button" onclick="event.stopPropagation(); deleteJobById('${escapeHtml(job.id)}')" class="p-1.5 rounded-lg bg-bgBase hover:bg-rose-950/50 text-slate-400 hover:text-rose-300 border border-borderSubtle transition-colors cursor-pointer" title="Remover do histórico">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+              </svg>
+            </button>
+          `;
+        }
+      }
+    }
+
     function renderJobsTable() {
       const tbody = document.getElementById('jobs-table-body');
       const allJobs = appState.jobs || [];
@@ -967,239 +1227,55 @@
       const finished = allJobs.filter(j => ['completed', 'cancelled', 'error'].includes(j.status)).slice().reverse();
       const ordered = [...running, ...queued, ...finished].filter(matchesFilter);
 
-      document.getElementById('table-footer-stats').textContent =
-        `Exibindo ${ordered.length} de ${allJobs.length} job(s)`;
+      setTextIfChanged(
+        document.getElementById('table-footer-stats'),
+        `Exibindo ${ordered.length} de ${allJobs.length} job(s)`
+      );
 
       if (ordered.length === 0) {
-        tbody.innerHTML = `
-          <tr>
-            <td colspan="7" class="py-14 px-6 text-center">
-              <div class="max-w-sm mx-auto space-y-3">
-                <div class="w-12 h-12 rounded-2xl bg-bgElevated border border-borderHighlight flex items-center justify-center mx-auto text-slate-400">
-                  <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.75" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>
-                  </svg>
+        if (!tbody.querySelector('[data-empty-row="1"]')) {
+          tbody.innerHTML = `
+            <tr data-empty-row="1">
+              <td colspan="7" class="py-14 px-6 text-center">
+                <div class="max-w-sm mx-auto space-y-3">
+                  <div class="w-12 h-12 rounded-2xl bg-bgElevated border border-borderHighlight flex items-center justify-center mx-auto text-slate-400">
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.75" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>
+                    </svg>
+                  </div>
+                  <div class="text-sm font-display font-semibold text-white">Nenhum job na fila ou histórico para este filtro</div>
+                  <p class="text-xs text-slate-400">Clique em <strong>+ Novo Download</strong> para selecionar um canal ou grupo, escolher os tipos de mídia e iniciar ou enfileirar um lote.</p>
+                  <button type="button" onclick="openNewBatchModal()" class="mt-1 inline-flex items-center space-x-2 px-4 py-2 rounded-lg bg-telegram hover:bg-telegramHover text-white text-xs font-semibold shadow-lg shadow-telegram/20 transition-all cursor-pointer">
+                    <span>+ Novo Download</span>
+                  </button>
                 </div>
-                <div class="text-sm font-display font-semibold text-white">Nenhum job na fila ou histórico para este filtro</div>
-                <p class="text-xs text-slate-400">Clique em <strong>+ Novo Download</strong> para selecionar um canal ou grupo, escolher os tipos de mídia e iniciar ou enfileirar um lote.</p>
-                <button onclick="openNewBatchModal()" class="mt-1 inline-flex items-center space-x-2 px-4 py-2 rounded-lg bg-telegram hover:bg-telegramHover text-white text-xs font-semibold shadow-lg shadow-telegram/20 transition-all">
-                  <span>+ Novo Download</span>
-                </button>
-              </div>
-            </td>
-          </tr>
-        `;
+              </td>
+            </tr>
+          `;
+        }
         return;
       }
 
-      tbody.innerHTML = ordered.map(job => {
-        const st = job.status || 'queued';
-        const isActive = ['scanning', 'downloading', 'cancelling'].includes(st);
-        const isQueued = st === 'queued';
-        const isCompleted = st === 'completed';
-        const isFailed = st === 'error' || st === 'cancelled';
+      const emptyRow = tbody.querySelector('[data-empty-row="1"]');
+      if (emptyRow) emptyRow.remove();
 
-        const rowBg = isActive
-          ? 'bg-telegram/[0.05] hover:bg-telegram/[0.09] border-l-2 border-l-telegram'
-          : 'hover:bg-bgElevated/40';
-
-        const initials = (job.chat_title || 'TG').replace(/[^a-zA-Z0-9]/g, '').slice(0, 2).toUpperCase() || 'TG';
-        const avatarCls = isActive
-          ? 'bg-telegram/20 border-telegram/40 text-telegram'
-          : (isCompleted ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400' : (isFailed ? 'bg-rose-500/10 border-rose-500/30 text-rose-400' : 'bg-slate-800 border-slate-700 text-slate-300'));
-
-        // Progress cell
-        let progressHtml = '';
-        if (isActive) {
-          const pct = Number(job.percent || 0).toFixed(1);
-          const filesLabel = job.total_files > 0 ? `${job.processed || 0} / ${job.total_files} arq.` : 'Escaneando canal...';
-          const etaLabel = job.eta_seconds ? `ETA: ${formatShortEta(job.eta_seconds)}` : `Tempo: ${formatDuration(job.elapsed_seconds)}`;
-          progressHtml = `
-            <div class="space-y-1.5">
-              <div class="flex justify-between text-xs font-mono">
-                <span class="text-white font-medium">${filesLabel}</span>
-                <span class="text-telegram font-semibold">${pct}%</span>
-              </div>
-              <div class="w-full h-2 bg-slate-800 rounded-full overflow-hidden">
-                <div class="bg-gradient-to-r from-telegram to-indigoAccent h-full rounded-full transition-all duration-300" style="width: ${Math.min(100, pct)}%"></div>
-              </div>
-              <div class="flex justify-between text-[10px] font-mono text-slate-400">
-                <span>${formatBytes(job.bytes_downloaded || 0)}${job.total_size_bytes ? ' / ' + formatBytes(job.total_size_bytes) : ''}</span>
-                <span>${etaLabel}</span>
-              </div>
-            </div>
-          `;
-        } else if (isQueued) {
-          progressHtml = `
-            <div class="space-y-1.5">
-              <div class="flex justify-between text-xs font-mono text-slate-400">
-                <span>Aguardando slot</span>
-                <span>0%</span>
-              </div>
-              <div class="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden"></div>
-              <div class="text-[10px] font-mono text-slate-500">Limite: ${job.message_limit ? job.message_limit + ' msgs' : 'Histórico completo'}</div>
-            </div>
-          `;
-        } else if (isCompleted) {
-          const totalF = job.total_files || job.processed || 0;
-          progressHtml = `
-            <div class="space-y-1.5">
-              <div class="flex justify-between text-xs font-mono">
-                <span class="text-slate-300">${totalF} / ${totalF} arq.</span>
-                <span class="text-emerald-400 font-semibold">100%</span>
-              </div>
-              <div class="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden">
-                <div class="bg-emerald-500 h-full w-full rounded-full"></div>
-              </div>
-              <div class="flex justify-between text-[10px] font-mono text-slate-400">
-                <span>${formatBytes(job.bytes_downloaded || job.total_size_bytes || 0)} (${job.skipped || 0} pulados)</span>
-                <span>Tempo: ${formatDuration(job.elapsed_seconds)}</span>
-              </div>
-            </div>
-          `;
-        } else {
-          const pct = Number(job.percent || 0).toFixed(1);
-          progressHtml = `
-            <div class="space-y-1.5">
-              <div class="flex justify-between text-xs font-mono">
-                <span class="text-slate-300">${job.processed || 0} / ${job.total_files || 0} arq.</span>
-                <span class="text-rose-400">${pct}%</span>
-              </div>
-              <div class="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden">
-                <div class="bg-rose-500 h-full rounded-full" style="width: ${Math.min(100, pct)}%"></div>
-              </div>
-              <div class="text-[10px] font-mono text-rose-400 truncate" title="${escapeHtml(job.error || '')}">
-                ${escapeHtml(job.error || (st === 'cancelled' ? 'Interrompido pelo usuário' : 'Falha na execução'))}
-              </div>
-            </div>
-          `;
+      const validIds = new Set(ordered.map(j => j.id));
+      Array.from(tbody.querySelectorAll('tr[data-job-id]')).forEach(existingTr => {
+        if (!validIds.has(existingTr.dataset.jobId)) {
+          existingTr.remove();
         }
+      });
 
-        // Throughput cell
-        let throughputHtml = '';
-        if (isActive) {
-          const activeW = (job.active_workers || []).length;
-          throughputHtml = `
-            <div class="font-mono text-xs text-emerald-400 font-semibold">${formatSpeed(job.total_speed_bps)}</div>
-            <div class="text-[10px] font-mono text-slate-400">${activeW}/${job.batch_size || 5} workers ativos</div>
-          `;
-        } else if (isQueued) {
-          throughputHtml = `
-            <div class="font-mono text-xs text-slate-500">-- MB/s</div>
-            <div class="text-[10px] font-mono text-slate-500">${job.batch_size || 5} workers config.</div>
-          `;
-        } else {
-          throughputHtml = `
-            <div class="font-mono text-xs text-slate-400">${job.avg_speed_bps ? 'Média: ' + formatSpeed(job.avg_speed_bps) : '-- MB/s'}</div>
-            <div class="text-[10px] font-mono text-slate-500">${job.downloaded || 0} baixados</div>
-          `;
+      ordered.forEach((job, idx) => {
+        let tr = tbody.querySelector(`tr[data-job-id="${job.id}"]`);
+        if (!tr) {
+          tr = createJobRowElement(job.id);
         }
-
-        // Status badge
-        let statusBadge = '';
-        if (st === 'scanning') {
-          statusBadge = `<span class="inline-flex items-center space-x-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-telegram/15 text-telegram border border-telegram/30"><span class="w-1.5 h-1.5 rounded-full bg-telegram animate-ping"></span><span>Escaneando</span></span>`;
-        } else if (st === 'downloading') {
-          statusBadge = `<span class="inline-flex items-center space-x-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-telegram/15 text-telegram border border-telegram/30"><span class="w-1.5 h-1.5 rounded-full bg-telegram animate-ping"></span><span>Baixando</span></span>`;
-        } else if (st === 'cancelling') {
-          statusBadge = `<span class="inline-flex items-center space-x-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-amber-950/60 text-amber-300 border border-amber-800/50"><span>Cancelando...</span></span>`;
-        } else if (isQueued) {
-          statusBadge = `<span class="inline-flex items-center space-x-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-amber-950/50 text-amber-300 border border-amber-800/50"><span class="w-1.5 h-1.5 rounded-full bg-amber-400"></span><span>Na Fila #${job.queue_position || 1}</span></span>`;
-        } else if (isCompleted) {
-          statusBadge = `<span class="inline-flex items-center space-x-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-950/50 text-emerald-300 border border-emerald-800/50"><span class="w-1.5 h-1.5 rounded-full bg-emerald-400"></span><span>Concluído</span></span>`;
-        } else if (st === 'cancelled') {
-          statusBadge = `<span class="inline-flex items-center space-x-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-slate-800 text-slate-300 border border-slate-700"><span>Cancelado</span></span>`;
-        } else {
-          statusBadge = `<span class="inline-flex items-center space-x-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-rose-950/60 text-rose-300 border border-rose-800/60"><span class="w-1.5 h-1.5 rounded-full bg-rose-400"></span><span>Falha</span></span>`;
+        updateJobRowElement(tr, job);
+        if (tbody.children[idx] !== tr) {
+          tbody.insertBefore(tr, tbody.children[idx] || null);
         }
-
-        // Actions cell
-        let extraActions = '';
-        if (isActive) {
-          extraActions = `
-            <button onclick="event.stopPropagation(); cancelJobById('${job.id}')" class="p-1.5 rounded-lg bg-rose-950/40 hover:bg-rose-900/60 text-rose-300 border border-rose-800/50 transition-colors" title="Parar / Cancelar Job">
-              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
-              </svg>
-            </button>
-          `;
-        } else if (isQueued) {
-          extraActions = `
-            <button onclick="event.stopPropagation(); moveJobUp('${job.id}')" class="p-1.5 rounded-lg bg-bgBase hover:bg-bgElevated text-slate-400 hover:text-white border border-borderSubtle transition-colors" title="Subir prioridade na fila">
-              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 15l7-7 7 7"></path>
-              </svg>
-            </button>
-            <button onclick="event.stopPropagation(); deleteJobById('${job.id}')" class="p-1.5 rounded-lg bg-bgBase hover:bg-rose-950/50 text-slate-400 hover:text-rose-300 border border-borderSubtle transition-colors" title="Remover da fila">
-              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
-              </svg>
-            </button>
-          `;
-        } else {
-          extraActions = `
-            <button onclick="event.stopPropagation(); retryJobById('${job.id}')" class="p-1.5 rounded-lg bg-bgBase hover:bg-bgElevated text-slate-400 hover:text-telegram border border-borderSubtle transition-colors" title="Re-enfileirar Job">
-              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
-              </svg>
-            </button>
-            <button onclick="event.stopPropagation(); deleteJobById('${job.id}')" class="p-1.5 rounded-lg bg-bgBase hover:bg-rose-950/50 text-slate-400 hover:text-rose-300 border border-borderSubtle transition-colors" title="Remover do histórico">
-              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
-              </svg>
-            </button>
-          `;
-        }
-
-        return `
-          <tr class="${rowBg} transition-colors cursor-pointer" onclick="openTelemetryDrawer('${job.id}')">
-            <td class="py-4 pl-5 pr-3">
-              <div class="flex items-center space-x-3">
-                <div class="w-9 h-9 rounded-lg border flex items-center justify-center font-display font-bold text-xs shrink-0 ${avatarCls}">
-                  ${escapeHtml(initials)}
-                </div>
-                <div class="min-w-0">
-                  <div class="font-medium text-white truncate max-w-[240px]">${escapeHtml(job.chat_title || job.chat_input)}</div>
-                  <div class="text-xs font-mono text-slate-400 truncate max-w-[240px]">${escapeHtml(job.chat_input)} • <span class="text-slate-500">Job #${escapeHtml(job.id)}</span></div>
-                </div>
-              </div>
-            </td>
-            <td class="py-4 px-3">
-              <div class="flex flex-wrap gap-1">
-                ${renderMediaBadges(job.media_types || [job.media_type])}
-              </div>
-            </td>
-            <td class="py-4 px-3">
-              ${progressHtml}
-            </td>
-            <td class="py-4 px-3">
-              ${throughputHtml}
-            </td>
-            <td class="py-4 px-3">
-              ${statusBadge}
-            </td>
-            <td class="py-4 px-3">
-              <span class="font-mono text-xs text-slate-300 bg-bgBase px-2.5 py-1 rounded border border-borderSubtle inline-block max-w-[210px] truncate" title="${escapeHtml(job.dest_dir || '')}">
-                ${escapeHtml(job.dest_dir || '')}
-              </span>
-            </td>
-            <td class="py-4 pl-3 pr-5 text-right">
-              <div class="flex items-center justify-end space-x-1.5">
-                <button onclick="event.stopPropagation(); openLogsModal('${job.id}')" class="px-2.5 py-1.5 rounded-lg text-xs font-mono bg-bgBase hover:bg-bgElevated text-slate-300 hover:text-white border border-borderSubtle flex items-center space-x-1 transition-colors" title="Abrir Console de Logs">
-                  <svg class="w-3.5 h-3.5 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path>
-                  </svg>
-                  <span>Logs</span>
-                </button>
-                <button onclick="event.stopPropagation(); openTelemetryDrawer('${job.id}')" class="px-2.5 py-1.5 rounded-lg text-xs font-medium bg-telegram/15 hover:bg-telegram/25 text-telegram border border-telegram/30 flex items-center space-x-1 transition-colors" title="Inspecionar Workers &amp; Telemetria">
-                  <span>Detalhes</span>
-                </button>
-                ${extraActions}
-              </div>
-            </td>
-          </tr>
-        `;
-      }).join('');
+      });
     }
 
     // --- SLIDE-OVER TELEMETRY DRAWER ---
@@ -1271,56 +1347,87 @@
 
       const workersContainer = document.getElementById('drawer-workers-list');
       if (!isActive) {
-        workersContainer.innerHTML = `
+        const inactiveHtml = `
           <div class="bg-bgBase/70 border border-borderSubtle rounded-xl p-4 text-xs text-slate-400 text-center">
             ${st === 'queued'
               ? `Este job está aguardando na posição #${job.queue_position || 1} da fila com ${batchSize} workers configurados.`
               : `Job finalizado (${job.downloaded || 0} arquivos baixados, ${job.skipped || 0} pulados, ${job.failed_count || 0} falhas).`}
           </div>
         `;
+        setHtmlIfChanged(workersContainer, inactiveHtml);
       } else {
+        workersContainer.dataset.lastHtml = '';
         const slotCount = Math.max(workers.length, Math.min(batchSize, 6));
-        const cards = [];
+        const existingSlots = Array.from(workersContainer.querySelectorAll('[data-slot-idx]'));
+        if (existingSlots.length !== slotCount) {
+          workersContainer.innerHTML = Array.from({ length: slotCount }, (_, i) => `
+            <div data-slot-idx="${i}" class="bg-bgBase p-3.5 rounded-xl border border-borderSubtle space-y-2">
+              <div class="flex items-center justify-between text-xs">
+                <div class="flex items-center space-x-2 min-w-0">
+                  <span data-role="slot-badge" class="px-1.5 py-0.5 text-[10px] font-mono rounded font-semibold shrink-0">Slot ${String(i + 1).padStart(2, '0')}</span>
+                  <span data-role="slot-file" class="font-mono truncate"></span>
+                </div>
+                <span data-role="slot-speed" class="font-mono shrink-0 ml-2"></span>
+              </div>
+              <div data-role="slot-track" class="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden">
+                <div data-role="slot-bar" class="bg-telegram h-full rounded-full transition-all duration-200" style="width: 0%"></div>
+              </div>
+              <div data-role="slot-footer" class="flex justify-between text-[10px] font-mono text-slate-400">
+                <span data-role="slot-meta"></span>
+                <span data-role="slot-pct" class="text-slate-200 font-semibold"></span>
+              </div>
+            </div>
+          `).join('');
+        }
+
         for (let i = 0; i < slotCount; i++) {
-          const slotLabel = `Slot ${String(i + 1).padStart(2, '0')}`;
+          const slotEl = workersContainer.querySelector(`[data-slot-idx="${i}"]`);
+          if (!slotEl) continue;
           const w = workers[i];
+          const badgeEl = slotEl.querySelector('[data-role="slot-badge"]');
+          const fileEl = slotEl.querySelector('[data-role="slot-file"]');
+          const speedEl = slotEl.querySelector('[data-role="slot-speed"]');
+          const trackEl = slotEl.querySelector('[data-role="slot-track"]');
+          const barEl = slotEl.querySelector('[data-role="slot-bar"]');
+          const footerEl = slotEl.querySelector('[data-role="slot-footer"]');
+          const metaEl = slotEl.querySelector('[data-role="slot-meta"]');
+          const pctEl = slotEl.querySelector('[data-role="slot-pct"]');
+
           if (w) {
             const wpct = Number(w.percent || 0).toFixed(1);
             const isFlood = w.status === 'flood_wait';
-            cards.push(`
-              <div class="bg-bgBase p-3.5 rounded-xl border ${isFlood ? 'border-amber-700/60' : 'border-borderSubtle'} space-y-2">
-                <div class="flex items-center justify-between text-xs">
-                  <div class="flex items-center space-x-2 min-w-0">
-                    <span class="px-1.5 py-0.5 text-[10px] font-mono bg-telegram/20 text-telegram rounded font-semibold shrink-0">${slotLabel}</span>
-                    <span class="font-mono text-slate-200 truncate" title="${escapeHtml(w.filename)}">${escapeHtml(w.filename)}</span>
-                  </div>
-                  <span class="font-mono text-emerald-400 shrink-0 ml-2">${isFlood ? 'FloodWait' : formatSpeed(w.speed_bps)}</span>
-                </div>
-                <div class="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden">
-                  <div class="bg-telegram h-full rounded-full transition-all duration-200" style="width: ${Math.min(100, wpct)}%"></div>
-                </div>
-                <div class="flex justify-between text-[10px] font-mono text-slate-400">
-                  <span>msg_id: ${w.message_id} • ${formatBytes(w.current)} / ${formatBytes(w.total)}</span>
-                  <span class="text-slate-200 font-semibold">${wpct}%</span>
-                </div>
-              </div>
-            `);
+            const cardCls = `bg-bgBase p-3.5 rounded-xl border ${isFlood ? 'border-amber-700/60' : 'border-borderSubtle'} space-y-2`;
+            if (slotEl.className !== cardCls) slotEl.className = cardCls;
+            badgeEl.className = 'px-1.5 py-0.5 text-[10px] font-mono bg-telegram/20 text-telegram rounded font-semibold shrink-0';
+            fileEl.className = 'font-mono text-slate-200 truncate';
+            setTextIfChanged(fileEl, w.filename);
+            if (fileEl.title !== (w.filename || '')) fileEl.title = w.filename || '';
+            speedEl.className = 'font-mono text-emerald-400 shrink-0 ml-2';
+            setTextIfChanged(speedEl, isFlood ? 'FloodWait' : formatSpeed(w.speed_bps));
+            trackEl.classList.remove('hidden');
+            footerEl.classList.remove('hidden');
+            const wStr = `${Math.min(100, Number(wpct))}%`;
+            if (barEl.style.width !== wStr) barEl.style.width = wStr;
+            setTextIfChanged(metaEl, `msg_id: ${w.message_id} • ${formatBytes(w.current)} / ${formatBytes(w.total)}`);
+            setTextIfChanged(pctEl, `${wpct}%`);
           } else {
-            cards.push(`
-              <div class="bg-bgBase/40 p-3 rounded-xl border border-borderSubtle/60 flex items-center justify-between text-xs text-slate-500">
-                <div class="flex items-center space-x-2">
-                  <span class="px-1.5 py-0.5 text-[10px] font-mono bg-slate-800 text-slate-400 rounded">${slotLabel}</span>
-                  <span class="font-mono">Aguardando próximo arquivo do semáforo...</span>
-                </div>
-                <span class="font-mono text-[11px]">Ocioso</span>
-              </div>
-            `);
+            const idleCls = 'bg-bgBase/40 p-3 rounded-xl border border-borderSubtle/60 space-y-0';
+            if (slotEl.className !== idleCls) slotEl.className = idleCls;
+            badgeEl.className = 'px-1.5 py-0.5 text-[10px] font-mono bg-slate-800 text-slate-400 rounded shrink-0';
+            fileEl.className = 'font-mono text-slate-500 truncate';
+            setTextIfChanged(fileEl, 'Aguardando próximo arquivo do semáforo...');
+            speedEl.className = 'font-mono text-[11px] text-slate-500 shrink-0 ml-2';
+            setTextIfChanged(speedEl, 'Ocioso');
+            trackEl.classList.add('hidden');
+            footerEl.classList.add('hidden');
           }
         }
-        workersContainer.innerHTML = cards.join('');
       }
 
-      document.getElementById('drawer-media-badges').innerHTML = renderMediaBadges(job.media_types || [job.media_type]);
+      setHtmlIfChanged(
+        document.getElementById('drawer-media-badges'),
+        renderMediaBadges(job.media_types || [job.media_type])
+      );
       document.getElementById('drawer-dest-path').textContent = job.dest_dir || '';
       document.getElementById('drawer-limit-info').textContent =
         `Limite: ${job.message_limit ? job.message_limit + ' msgs' : 'Sem limite (histórico completo)'}`;
@@ -1396,9 +1503,16 @@
 
       const container = document.getElementById('logs-modal-body');
       if (logs.length === 0) {
-        container.innerHTML = `<div class="text-slate-500 py-8 text-center">Nenhum evento registrado para este job até o momento.</div>`;
+        setHtmlIfChanged(container, `<div class="text-slate-500 py-8 text-center">Nenhum evento registrado para este job até o momento.</div>`);
         return;
       }
+
+      const lastEntry = logs[logs.length - 1] || {};
+      const logSig = `${job.id}:${logs.length}:${lastEntry.time || ''}:${lastEntry.filename || ''}:${lastEntry.message || ''}`;
+      if (container.dataset.logSig === logSig) {
+        return;
+      }
+      container.dataset.logSig = logSig;
 
       const tagMap = {
         success: { tag: '[OK]', cls: 'text-emerald-400' },
