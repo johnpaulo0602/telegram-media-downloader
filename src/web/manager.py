@@ -1,223 +1,38 @@
 import asyncio
+from collections import deque
 import json
 import os
-import shutil
-import sys
 import time
-from collections import deque
-from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, HTMLResponse
-from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from fastapi import HTTPException, WebSocket
 from telethon import TelegramClient, utils
 
-# Ensure `src.tbmd` is importable whether invoked as `python src/web.py` or `uvicorn src.web:app`
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
+from src.downloader import (
+    DownloadSession,
+    download_file,
+    get_queue_db,
+    is_already_downloaded,
+    load_state,
+    resolve_channel,
+)
+from src.models import (
+    PreviewRequest,
+    StartDownloadRequest,
+)
+from src.settings import load_settings
+from src.utils import (
+    MEDIA_TYPES,
+    dialog_kind,
+    filter_media_messages,
+    get_media_filename,
+    is_running_in_docker,
+    normalize_media_types,
+    search_dialogs,
+)
 
-import src.tbmd as tbmd
-
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 JOBS_FILE = os.path.join(PROJECT_ROOT, "jobs_history.json")
-
-
-def is_running_in_docker() -> bool:
-    """Detect if the application is running inside a Docker/OCI container."""
-    if os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv"):
-        return True
-    try:
-        if os.path.exists("/proc/1/cgroup"):
-            with open("/proc/1/cgroup", "r", encoding="utf-8", errors="ignore") as f:
-                content = f.read()
-                if "docker" in content or "kubepods" in content or "containerd" in content:
-                    return True
-    except OSError:
-        pass
-    return False
-
-
-def get_filesystem_shortcuts(default_download_dir: str) -> list[dict[str, str]]:
-    """Return helpful root/volume shortcuts depending on Host vs Docker environment."""
-    shortcuts = []
-    seen = set()
-
-    def add_shortcut(label: str, raw_path: str, icon: str = "folder"):
-        abs_path = os.path.abspath(os.path.expanduser(raw_path))
-        if abs_path not in seen and (os.path.isdir(abs_path) or abs_path == os.path.abspath(default_download_dir)):
-            seen.add(abs_path)
-            shortcuts.append({"label": label, "path": abs_path, "icon": icon})
-
-    add_shortcut("Downloads (Padrão)", default_download_dir, "download")
-    add_shortcut("Pasta do Projeto", PROJECT_ROOT, "code")
-    add_shortcut("Home (~)", "~", "home")
-
-    # Common Docker/Homelab mount points and macOS/Linux media roots
-    candidate_mounts = [
-        ("/downloads", "Volume /downloads", "hard-drive"),
-        ("/media", "Volume /media", "hard-drive"),
-        ("/mnt", "Volume /mnt", "hard-drive"),
-        ("/data", "Volume /data", "hard-drive"),
-        ("/storage", "Volume /storage", "hard-drive"),
-        ("/Volumes", "Volumes (macOS)", "hard-drive"),
-    ]
-    for mount_path, label, icon in candidate_mounts:
-        if os.path.isdir(mount_path):
-            add_shortcut(label, mount_path, icon)
-
-    root_path = os.path.abspath(os.sep)
-    add_shortcut(f"Raiz ({root_path})", root_path, "server")
-    return shortcuts
-
-
-def browse_directory(target_path: str | None, default_dir: str, show_hidden: bool = False) -> dict[str, Any]:
-    """
-    Inspect a directory on the host/container filesystem and return its subdirectories,
-    breadcrumbs, and writability status.
-    """
-    raw = (target_path or "").strip() or default_dir
-    expanded = os.path.abspath(os.path.expanduser(raw))
-
-    # If the target directory does not exist yet (e.g. default `downloads/`), walk up to existing parent
-    probe = expanded
-    while not os.path.exists(probe):
-        parent = os.path.dirname(probe)
-        if parent == probe:
-            break
-        probe = parent
-
-    exists = os.path.isdir(expanded)
-    browse_target = expanded if exists else probe
-    if not os.path.isdir(browse_target):
-        browse_target = os.path.abspath(".")
-
-    writable = os.access(browse_target, os.W_OK)
-
-    # Build breadcrumbs from filesystem root to `expanded`
-    path_obj = Path(expanded)
-    parts = path_obj.parts
-    breadcrumbs = []
-    accum = ""
-    for index, part in enumerate(parts):
-        if index == 0:
-            accum = part
-            label = part
-        else:
-            accum = os.path.join(accum, part)
-            label = part
-        breadcrumbs.append({"name": label, "path": accum})
-
-    parent_dir = os.path.dirname(browse_target)
-    if parent_dir == browse_target:
-        parent_dir = None
-
-    directories = []
-    permission_error = False
-    try:
-        with os.scandir(browse_target) as entries:
-            for entry in entries:
-                try:
-                    if not entry.is_dir(follow_symlinks=True):
-                        continue
-                    if not show_hidden and entry.name.startswith("."):
-                        continue
-                    if entry.name in ("__pycache__", "node_modules", "venv", ".venv"):
-                        continue
-                    dir_writable = os.access(entry.path, os.W_OK)
-                    directories.append({
-                        "name": entry.name,
-                        "path": os.path.abspath(entry.path),
-                        "writable": dir_writable,
-                    })
-                except OSError:
-                    continue
-    except PermissionError:
-        permission_error = True
-    except OSError:
-        permission_error = True
-
-    directories.sort(key=lambda d: d["name"].casefold())
-
-    disk_free = 0
-    disk_total = 0
-    try:
-        usage = shutil.disk_usage(browse_target)
-        disk_free = usage.free
-        disk_total = usage.total
-    except OSError:
-        pass
-
-    return {
-        "requested_path": expanded,
-        "current_path": browse_target,
-        "exists": exists,
-        "writable": writable,
-        "permission_error": permission_error,
-        "parent_path": parent_dir,
-        "breadcrumbs": breadcrumbs,
-        "directories": directories,
-        "shortcuts": get_filesystem_shortcuts(default_dir),
-        "is_docker": is_running_in_docker(),
-        "disk_free_bytes": disk_free,
-        "disk_total_bytes": disk_total,
-    }
-
-
-def normalize_media_types(media_type: str | None, media_types: list[str] | None) -> list[str]:
-    """Validate and normalize single or multiple media_type inputs into a non-empty list of keys."""
-    raw_list: list[str] = []
-    if media_types:
-        raw_list = [m.strip() for m in media_types if m and m.strip()]
-    elif media_type and media_type.strip():
-        raw_list = [media_type.strip()]
-    else:
-        raw_list = ["videos"]
-
-    valid: list[str] = []
-    for item in raw_list:
-        if item not in tbmd.MEDIA_TYPES:
-            raise HTTPException(status_code=400, detail=f"Tipo de mídia inválido: '{item}'.")
-        if item not in valid:
-            valid.append(item)
-
-    if not valid:
-        raise HTTPException(status_code=400, detail="Selecione ao menos um tipo de mídia válido.")
-
-    if "all" in valid:
-        return ["all"]
-    return valid
-
-
-class MkdirRequest(BaseModel):
-    parent_path: str
-    folder_name: str
-
-
-class PreviewRequest(BaseModel):
-    chat: str
-    media_type: str = "videos"
-    media_types: list[str] | None = None
-    message_limit: int | None = None
-    dest_dir: str | None = None
-    append_type_folder: bool = True
-
-
-class StartDownloadRequest(BaseModel):
-    chat: str
-    chat_title: str | None = None
-    media_type: str = "videos"
-    media_types: list[str] | None = None
-    message_limit: int | None = None
-    batch_size: int | None = None
-    dest_dir: str | None = None
-    append_type_folder: bool = True
-
-
-class QueuePauseRequest(BaseModel):
-    paused: bool | None = None
 
 
 class WebDownloadManager:
@@ -240,11 +55,11 @@ class WebDownloadManager:
         self.current_job_id: str | None = None
         self.queue_runner_task: asyncio.Task | None = None
 
-        # Active or most recent job state (preserved for compatibility + live tracking)
-        self.job_status: str = "idle"  # idle, scanning, downloading, cancelling, completed, cancelled, error
+        # Active or most recent job state
+        self.job_status: str = "idle"
         self.job_error: str | None = None
         self.job_info: dict[str, Any] = {}
-        self.active_Session: tbmd.DownloadSession | None = None
+        self.active_Session: DownloadSession | None = None
         self.active_task: asyncio.Task | None = None
         self.active_workers: dict[int, dict[str, Any]] = {}
         self.recent_logs: deque = deque(maxlen=250)
@@ -281,7 +96,6 @@ class WebDownloadManager:
             for job in loaded_jobs:
                 if not isinstance(job, dict) or not job.get("id"):
                     continue
-                # Any job interrupted mid-flight when server stopped is marked cancelled
                 if job.get("status") in ("scanning", "downloading", "cancelling"):
                     job["status"] = "cancelled"
                     job["error"] = "Interrompido por reinicialização do servidor"
@@ -289,16 +103,15 @@ class WebDownloadManager:
                     job["total_speed_bps"] = 0
                 cleaned_jobs.append(job)
             self.jobs = cleaned_jobs
-        except ( json.JSONDecodeError, OSError, ValueError ):
+        except (json.JSONDecodeError, OSError, ValueError):
             self.jobs = []
 
     def save_jobs_history(self):
         """Persist jobs list and queue counter to disk."""
         try:
             serializable_jobs = []
-            for j in self.jobs[-100:]:  # Keep up to 100 recent jobs
+            for j in self.jobs[-100:]:
                 copy_j = dict(j)
-                # Ensure logs list is bounded when saving
                 copy_j["recent_logs"] = list(copy_j.get("recent_logs", []))[:150]
                 copy_j["active_workers"] = [] if copy_j.get("status") not in ("scanning", "downloading") else copy_j.get("active_workers", [])
                 serializable_jobs.append(copy_j)
@@ -325,12 +138,17 @@ class WebDownloadManager:
         return None
 
     async def initialize(self):
-        """Load config and connect TelegramClient if credentials exist."""
-        self.config, self.config_error = tbmd.load_config()
-        if self.config_error or not self.config:
+        """Load settings and connect TelegramClient if credentials exist."""
+        settings, err = load_settings()
+        if err or not settings:
+            self.config = None
+            self.config_error = err
             self.connected = False
             self.authorized = False
             return
+
+        self.config = settings.to_dict()
+        self.config_error = None
 
         session_path = os.path.join(PROJECT_ROOT, self.config["session_name"])
         if self.client is not None:
@@ -356,7 +174,6 @@ class WebDownloadManager:
                     "username": getattr(me, "username", None),
                     "phone": getattr(me, "phone", None),
                 }
-                # Resume queued jobs if any exist and queue is not paused
                 self._ensure_queue_processor()
             else:
                 self.user_info = None
@@ -384,7 +201,7 @@ class WebDownloadManager:
             effective_key = media_type[0] if len(media_type) == 1 else "all"
         else:
             effective_key = media_type
-        media_folder = tbmd.MEDIA_TYPES.get(effective_key, tbmd.MEDIA_TYPES["all"])["folder"]
+        media_folder = MEDIA_TYPES.get(effective_key, MEDIA_TYPES["all"])["folder"]
 
         if custom_dir and custom_dir.strip():
             base = os.path.abspath(os.path.expanduser(custom_dir.strip()))
@@ -392,13 +209,11 @@ class WebDownloadManager:
             base = os.path.abspath(os.path.expanduser(base_default))
 
         if append_type_folder:
-            # Avoid duplicating the subfolder if user already selected `<path>/<folder>`
             if os.path.basename(base).lower() != media_folder.lower():
                 return os.path.join(base, media_folder)
         return base
 
     def _sync_active_job_metrics(self):
-        """Update the currently active job dict in `self.jobs` with live metrics."""
         job = self._get_job(self.current_job_id)
         if not job:
             return
@@ -459,7 +274,6 @@ class WebDownloadManager:
         })
 
     def get_snapshot(self) -> dict[str, Any]:
-        """Return a JSON-serializable snapshot of the server, queue, and jobs state."""
         self._sync_active_job_metrics()
 
         session = self.active_Session
@@ -482,7 +296,6 @@ class WebDownloadManager:
         in_flight_bytes = sum(w.get("current", 0) for w in active_list)
         bytes_downloaded = self.completed_bytes + in_flight_bytes
 
-        # Assign 1-based queue_position to queued jobs in FIFO order
         queue_pos = 0
         running_count = 0
         queued_count = 0
@@ -522,7 +335,7 @@ class WebDownloadManager:
                 "message_limit": (self.config or {}).get("message_limit", 2000),
                 "media_types": [
                     {"key": k, "label": v["label"], "folder": v["folder"]}
-                    for k, v in tbmd.MEDIA_TYPES.items()
+                    for k, v in MEDIA_TYPES.items()
                 ],
             },
             "queue": {
@@ -556,7 +369,6 @@ class WebDownloadManager:
         }
 
     async def broadcast_state(self, force: bool = False):
-        """Send current state snapshot to all connected WebSocket clients, throttled to ~10Hz."""
         if not self.ws_clients:
             self._sync_active_job_metrics()
             return
@@ -587,7 +399,7 @@ class WebDownloadManager:
     def _add_log(self, kind: str, filename: str, message: str, size: int | None = None, job_id: str | None = None):
         entry = {
             "time": time.strftime("%H:%M:%S"),
-            "kind": kind,  # success, skipped, error, warning, info
+            "kind": kind,
             "filename": filename,
             "message": message,
             "size": size,
@@ -602,7 +414,6 @@ class WebDownloadManager:
                 del logs[250:]
 
     def _on_download_event(self, event_type: str, payload: dict[str, Any]):
-        """Callback invoked by `tbmd.download_file` during batch execution."""
         msg_id = payload.get("message_id")
         filename = payload.get("filename", "")
         now = time.time()
@@ -681,7 +492,7 @@ class WebDownloadManager:
             self.dialogs_updated_at = now
 
         if query and query.strip():
-            filtered = tbmd.search_dialogs(self.dialogs_cache, query)
+            filtered = search_dialogs(self.dialogs_cache, query)
         else:
             filtered = [d for d in self.dialogs_cache if d.is_channel or d.is_group]
 
@@ -691,14 +502,12 @@ class WebDownloadManager:
             results.append({
                 "id": d.id,
                 "name": d.name or "Sem nome",
-                "kind": tbmd.dialog_kind(d),
+                "kind": dialog_kind(d),
                 "username": f"@{username}" if username else None,
                 "unread_count": d.unread_count or 0,
                 "input_value": f"@{username}" if username else str(d.id),
             })
 
-        # Fallback: if no cached dialog matched and query looks like @username, t.me URL, or numeric ID,
-        # attempt to resolve directly via Telegram API so public channels/links also work in the search bar.
         cleaned_q = (query or "").strip()
         if not results and cleaned_q and (
             cleaned_q.startswith("@")
@@ -706,7 +515,7 @@ class WebDownloadManager:
             or cleaned_q.lstrip("-").isdigit()
         ):
             try:
-                entity = await tbmd.resolve_channel(self.client, cleaned_q)
+                entity = await resolve_channel(self.client, cleaned_q)
                 if entity is not None:
                     username = getattr(entity, "username", None)
                     entity_id = utils.get_peer_id(entity)
@@ -733,7 +542,7 @@ class WebDownloadManager:
         media_types = normalize_media_types(req.media_type, req.media_types)
 
         try:
-            channel = await tbmd.resolve_channel(self.client, req.chat)
+            channel = await resolve_channel(self.client, req.chat)
         except Exception as e:
             raise HTTPException(status_code=404, detail=f"Não foi possível encontrar o chat '{req.chat}': {e}")
 
@@ -741,19 +550,16 @@ class WebDownloadManager:
             raise HTTPException(status_code=400, detail="Informe um canal, grupo, username ou ID válido.")
 
         limit = req.message_limit if (req.message_limit and req.message_limit > 0) else None
-        if len(media_types) == 1:
-            filter_class = tbmd.MEDIA_TYPES[media_types[0]]["filter"]
-        else:
-            filter_class = None
+        filter_class = MEDIA_TYPES[media_types[0]]["filter"] if len(media_types) == 1 else None
 
         messages = await self.client.get_messages(
             channel,
             filter=filter_class() if filter_class else None,
             limit=limit,
         )
-        media_messages = tbmd.filter_media_messages(messages, media_types)
+        media_messages = filter_media_messages(messages, media_types)
         dest_dir = self.resolve_destination(req.dest_dir, media_types, req.append_type_folder)
-        state = tbmd.load_state()
+        state = load_state()
         chat_id = str(getattr(channel, "id", req.chat))
         chat_title = utils.get_display_name(channel) or str(req.chat)
 
@@ -762,11 +568,11 @@ class WebDownloadManager:
         samples = []
 
         for msg in media_messages:
-            fname, _ = tbmd.get_media_filename(msg)
+            fname, _ = get_media_filename(msg)
             dest_path = os.path.join(dest_dir, fname)
             fsize = msg.file.size if msg.file and msg.file.size else 0
             total_bytes += fsize
-            already = tbmd.is_already_downloaded(state, chat_id, msg.id, dest_path)
+            already = is_already_downloaded(state, chat_id, msg.id, dest_path)
             if already:
                 already_count += 1
             if len(samples) < 8:
@@ -777,7 +583,7 @@ class WebDownloadManager:
                     "already_downloaded": already,
                 })
 
-        media_labels = [tbmd.MEDIA_TYPES[k]["label"] for k in media_types]
+        media_labels = [MEDIA_TYPES[k]["label"] for k in media_types]
         return {
             "chat_title": chat_title,
             "chat_id": chat_id,
@@ -794,12 +600,11 @@ class WebDownloadManager:
         }
 
     async def start_download_job(self, req: StartDownloadRequest) -> dict[str, Any]:
-        """Create a new job in the FIFO queue and start execution immediately if idle."""
         if not self.client or not self.authorized:
             raise HTTPException(status_code=400, detail="Sessão do Telegram não está autenticada.")
 
         media_types = normalize_media_types(req.media_type, req.media_types)
-        media_labels = [tbmd.MEDIA_TYPES[k]["label"] for k in media_types]
+        media_labels = [MEDIA_TYPES[k]["label"] for k in media_types]
 
         dest_dir = self.resolve_destination(req.dest_dir, media_types, req.append_type_folder)
         batch_size = max(1, req.batch_size or (self.config or {}).get("batch_size", 5))
@@ -856,9 +661,7 @@ class WebDownloadManager:
         self.jobs.append(new_job)
         self.save_jobs_history()
 
-        # Start or wake up the FIFO queue processor
         self._ensure_queue_processor()
-        # Yield briefly so if the queue was idle, the job transitions to `scanning` immediately
         await asyncio.sleep(0)
         await self.broadcast_state(force=True)
         return self.get_snapshot()
@@ -872,7 +675,6 @@ class WebDownloadManager:
                 pass
 
     async def _process_queue(self):
-        """Process queued jobs sequentially in FIFO order."""
         while True:
             if self.queue_paused or not self.client or not self.authorized:
                 break
@@ -940,7 +742,7 @@ class WebDownloadManager:
         effective_limit = job["message_limit"]
 
         try:
-            channel = await tbmd.resolve_channel(self.client, chat_input)
+            channel = await resolve_channel(self.client, chat_input)
             if channel is None:
                 raise ValueError(f"Chat '{chat_input}' não encontrado.")
 
@@ -957,17 +759,14 @@ class WebDownloadManager:
             self._add_log("info", chat_title, f"Buscando mensagens no chat (limite: {effective_limit or 'ilimitado'})...")
             await self.broadcast_state(force=True)
 
-            if len(media_types) == 1:
-                filter_class = tbmd.MEDIA_TYPES[media_types[0]]["filter"]
-            else:
-                filter_class = None
+            filter_class = MEDIA_TYPES[media_types[0]]["filter"] if len(media_types) == 1 else None
 
             messages = await self.client.get_messages(
                 channel,
                 filter=filter_class() if filter_class else None,
                 limit=effective_limit,
             )
-            media_messages = tbmd.filter_media_messages(messages, media_types)
+            media_messages = filter_media_messages(messages, media_types)
             self.total_files = len(media_messages)
             total_size_bytes = sum(
                 (m.file.size if getattr(m, "file", None) and getattr(m.file, "size", None) else 0)
@@ -984,20 +783,45 @@ class WebDownloadManager:
                 return
 
             os.makedirs(dest_dir, exist_ok=True)
-            state = tbmd.load_state()
-            self.active_Session = tbmd.DownloadSession(
+            state = load_state()
+            db = get_queue_db((self.config or {}).get("db_path"))
+
+            # Pre-enqueue all messages into the persistent SQLite database
+            if media_messages and db:
+                items_payload = []
+                for msg in media_messages:
+                    fn, _ = get_media_filename(msg)
+                    dp = os.path.join(dest_dir, fn)
+                    fs = (
+                        msg.file.size
+                        if getattr(msg, "file", None) and getattr(msg.file, "size", None)
+                        else 0
+                    )
+                    items_payload.append({
+                        "chat_id": chat_id,
+                        "chat_title": chat_title,
+                        "message_id": msg.id,
+                        "file_name": fn,
+                        "dest_path": dp,
+                        "file_size": fs,
+                        "media_type": media_types[0] if len(media_types) == 1 else "all",
+                    })
+                db.enqueue_batch(items_payload)
+
+            self.active_Session = DownloadSession(
                 dest_dir=dest_dir,
                 chat_key=chat_id,
                 state=state,
                 batch_size=batch_size,
                 event_callback=self._on_download_event,
+                db=db,
             )
             self.job_status = "downloading"
             self._add_log("info", chat_title, f"Iniciando download de {len(media_messages)} mídias para {dest_dir}")
             await self.broadcast_state(force=True)
 
             await asyncio.gather(*[
-                tbmd.download_file(msg, self.active_Session)
+                download_file(msg, self.active_Session)
                 for msg in media_messages
             ])
 
@@ -1041,7 +865,6 @@ class WebDownloadManager:
             self.active_Session = None
 
     async def cancel_job(self, job_id: str | None = None) -> dict[str, Any]:
-        """Cancel a specific job by ID (queued or running) or the currently active job."""
         target_id = job_id or self.current_job_id
         job = self._get_job(target_id)
 
@@ -1066,7 +889,6 @@ class WebDownloadManager:
         return self.get_snapshot()
 
     async def delete_job(self, job_id: str) -> dict[str, Any]:
-        """Delete a job from the queue/history. If currently running, cancel it first."""
         job = self._get_job(job_id)
         if not job:
             raise HTTPException(status_code=404, detail="Job não encontrado.")
@@ -1081,14 +903,12 @@ class WebDownloadManager:
         return self.get_snapshot()
 
     async def move_job_up(self, job_id: str) -> dict[str, Any]:
-        """Move a queued job one position earlier among queued jobs."""
         idx = next((i for i, j in enumerate(self.jobs) if j.get("id") == job_id), None)
         if idx is None:
             raise HTTPException(status_code=404, detail="Job não encontrado.")
         if self.jobs[idx].get("status") != "queued":
             raise HTTPException(status_code=400, detail="Apenas jobs na fila podem ser reordenados.")
 
-        # Find the closest preceding queued job
         prev_queued_idx = None
         for i in range(idx - 1, -1, -1):
             if self.jobs[i].get("status") == "queued":
@@ -1102,7 +922,6 @@ class WebDownloadManager:
         return self.get_snapshot()
 
     async def retry_job(self, job_id: str) -> dict[str, Any]:
-        """Re-queue a completed, cancelled, or failed job."""
         job = self._get_job(job_id)
         if not job:
             raise HTTPException(status_code=404, detail="Job não encontrado.")
@@ -1133,7 +952,6 @@ class WebDownloadManager:
         return self.get_snapshot()
 
     async def clear_completed_jobs(self) -> dict[str, Any]:
-        """Remove all finished (completed, cancelled, error) jobs from the list."""
         self.jobs = [
             j for j in self.jobs
             if j.get("status") in ("queued", "scanning", "downloading", "cancelling")
@@ -1146,7 +964,6 @@ class WebDownloadManager:
         return self.get_snapshot()
 
     async def toggle_queue_pause(self, paused: bool | None = None) -> dict[str, Any]:
-        """Pause or resume the FIFO queue."""
         if paused is None:
             self.queue_paused = not self.queue_paused
         else:
@@ -1160,172 +977,3 @@ class WebDownloadManager:
 
 
 manager = WebDownloadManager()
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    await manager.initialize()
-    yield
-    await manager.shutdown()
-
-
-app = FastAPI(
-    title="Telegram Batch Media Downloader — Homelab UI",
-    version="2.0.0",
-    lifespan=lifespan,
-)
-
-STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
-
-
-@app.get("/", response_class=HTMLResponse)
-async def serve_index():
-    index_path = os.path.join(STATIC_DIR, "index.html")
-    if not os.path.exists(index_path):
-        return HTMLResponse("<h1>Interface não encontrada</h1>", status_code=404)
-    return FileResponse(index_path)
-
-
-@app.get("/api/status")
-async def api_status():
-    return manager.get_snapshot()
-
-
-@app.post("/api/reconnect")
-async def api_reconnect():
-    await manager.initialize()
-    return manager.get_snapshot()
-
-
-@app.get("/api/dialogs")
-async def api_dialogs(q: str = Query(default=""), refresh: bool = Query(default=False)):
-    dialogs = await manager.get_dialogs_list(query=q, refresh=refresh)
-    return {"dialogs": dialogs}
-
-
-@app.get("/api/fs")
-async def api_browse_fs(
-    path: str | None = Query(default=None),
-    show_hidden: bool = Query(default=False),
-):
-    default_dir = (manager.config or {}).get("download_dir", "downloads")
-    return browse_directory(path, default_dir=default_dir, show_hidden=show_hidden)
-
-
-@app.post("/api/fs/mkdir")
-async def api_mkdir(req: MkdirRequest):
-    safe_name = tbmd.safe_filename(req.folder_name.strip())
-    if not safe_name or safe_name in (".", ".."):
-        raise HTTPException(status_code=400, detail="Nome de pasta inválido.")
-
-    parent = os.path.abspath(os.path.expanduser(req.parent_path.strip() or "."))
-    new_dir = os.path.join(parent, safe_name)
-    try:
-        os.makedirs(new_dir, exist_ok=True)
-    except PermissionError:
-        raise HTTPException(status_code=403, detail=f"Sem permissão para criar pasta em '{parent}'.")
-    except OSError as e:
-        raise HTTPException(status_code=400, detail=f"Erro ao criar pasta: {e}")
-
-    default_dir = (manager.config or {}).get("download_dir", "downloads")
-    return browse_directory(new_dir, default_dir=default_dir)
-
-
-@app.post("/api/downloads/preview")
-async def api_preview_downloads(req: PreviewRequest):
-    return await manager.preview_media(req)
-
-
-@app.post("/api/downloads/start")
-async def api_start_downloads(req: StartDownloadRequest):
-    return await manager.start_download_job(req)
-
-
-@app.post("/api/downloads/cancel")
-async def api_cancel_downloads():
-    return await manager.cancel_job()
-
-
-@app.post("/api/jobs/clear-completed")
-async def api_clear_completed_jobs():
-    return await manager.clear_completed_jobs()
-
-
-@app.post("/api/jobs/{job_id}/cancel")
-async def api_cancel_job_by_id(job_id: str):
-    return await manager.cancel_job(job_id)
-
-
-@app.post("/api/jobs/{job_id}/delete")
-async def api_delete_job_by_id(job_id: str):
-    return await manager.delete_job(job_id)
-
-
-@app.post("/api/jobs/{job_id}/move-up")
-async def api_move_job_up(job_id: str):
-    return await manager.move_job_up(job_id)
-
-
-@app.post("/api/jobs/{job_id}/retry")
-async def api_retry_job(job_id: str):
-    return await manager.retry_job(job_id)
-
-
-@app.post("/api/jobs/{job_id}/logs/clear")
-async def api_clear_job_logs(job_id: str):
-    job = manager._get_job(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job não encontrado.")
-    job["recent_logs"] = []
-    if job_id == manager.current_job_id:
-        manager.recent_logs.clear()
-    manager.save_jobs_history()
-    await manager.broadcast_state(force=True)
-    return manager.get_snapshot()
-
-
-@app.post("/api/queue/pause")
-async def api_toggle_queue_pause(req: QueuePauseRequest | None = None):
-    paused = req.paused if req is not None else None
-    return await manager.toggle_queue_pause(paused)
-
-
-@app.post("/api/logs/clear")
-async def api_clear_logs():
-    manager.recent_logs.clear()
-    if manager.current_job_id:
-        job = manager._get_job(manager.current_job_id)
-        if job:
-            job["recent_logs"] = []
-    await manager.broadcast_state(force=True)
-    return manager.get_snapshot()
-
-
-@app.websocket("/ws")
-async def websocket_endpoint(ws: WebSocket):
-    await ws.accept()
-    manager.ws_clients.add(ws)
-    try:
-        await ws.send_json(manager.get_snapshot())
-        while True:
-            msg = await ws.receive_text()
-            if msg == "ping":
-                await ws.send_json(manager.get_snapshot())
-    except WebSocketDisconnect:
-        pass
-    except Exception:
-        pass
-    finally:
-        manager.ws_clients.discard(ws)
-
-
-def main():
-    import uvicorn
-
-    host = os.getenv("WEB_HOST", "0.0.0.0")
-    port = int(os.getenv("WEB_PORT", "8080"))
-    uvicorn.run("src.web:app", host=host, port=port, reload=False)
-
-
-if __name__ == "__main__":
-    main()

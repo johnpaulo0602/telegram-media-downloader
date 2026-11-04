@@ -6,8 +6,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi.testclient import TestClient
 
-import src.tbmd as tbmd
+import src.downloader as downloader
 import src.web as web
+from src.downloader import DownloadSession, download_file, set_queue_db
+from src.queue_db import QueueDatabase
 
 
 class TestFilesystemBrowser(unittest.TestCase):
@@ -48,15 +50,15 @@ class TestDownloadSessionEvents(unittest.TestCase):
     def test_download_file_emits_events(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state_file = os.path.join(tmpdir, "state.json")
-            orig_state_file = tbmd.STATE_FILE
-            tbmd.STATE_FILE = state_file
+            orig_state_file = downloader.STATE_FILE
+            downloader.STATE_FILE = state_file
             try:
                 events = []
 
                 def on_event(event_type, payload):
                     events.append((event_type, payload))
 
-                session = tbmd.DownloadSession(
+                session = DownloadSession(
                     dest_dir=tmpdir,
                     chat_key="chan_1",
                     state={},
@@ -80,7 +82,7 @@ class TestDownloadSessionEvents(unittest.TestCase):
 
                 msg.download_media = AsyncMock(side_effect=fake_download)
 
-                asyncio.run(tbmd.download_file(msg, session))
+                asyncio.run(download_file(msg, session))
 
                 self.assertEqual(session.downloaded, 1)
                 event_types = [e[0] for e in events]
@@ -88,7 +90,7 @@ class TestDownloadSessionEvents(unittest.TestCase):
                 self.assertIn("file_progress", event_types)
                 self.assertIn("file_complete", event_types)
             finally:
-                tbmd.STATE_FILE = orig_state_file
+                downloader.STATE_FILE = orig_state_file
 
 
 class TestWebEndpoints(unittest.TestCase):
@@ -221,6 +223,41 @@ class TestWebEndpoints(unittest.TestCase):
                 web.manager.jobs = []
                 web.JOBS_FILE = orig_jobs_file
 
+    def test_sqlite_queue_endpoints(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            test_db = os.path.join(tmpdir, "web_test.db")
+            db = QueueDatabase(test_db)
+            orig_db = downloader._queue_db
+            set_queue_db(db)
+            try:
+                # Enqueue some items
+                db.enqueue_item("test_web_chat", 101, "v1.mp4", "/tmp/v1.mp4", 1000)
+                item2_id, _ = db.enqueue_item("test_web_chat", 102, "v2.mp4", "/tmp/v2.mp4", 2000)
+                db.mark_failed(item2_id, "Connection error", auto_retry=False)
+
+                # 1. Test /api/queue/stats
+                resp_stats = self.client.get("/api/queue/stats?chat_id=test_web_chat")
+                self.assertEqual(resp_stats.status_code, 200)
+                data = resp_stats.json()["stats"]
+                self.assertEqual(data["pending"], 1)
+                self.assertEqual(data["failed"], 1)
+                self.assertEqual(data["total"], 2)
+
+                # 2. Test /api/queue/items
+                resp_items = self.client.get("/api/queue/items?chat_id=test_web_chat")
+                self.assertEqual(resp_items.status_code, 200)
+                items = resp_items.json()["items"]
+                self.assertEqual(len(items), 2)
+
+                # 3. Test /api/queue/retry-failed
+                resp_retry = self.client.post("/api/queue/retry-failed?chat_id=test_web_chat")
+                self.assertEqual(resp_retry.status_code, 200)
+                self.assertEqual(resp_retry.json()["retried_count"], 1)
+                new_stats = resp_retry.json()["stats"]
+                self.assertEqual(new_stats["failed"], 0)
+                self.assertEqual(new_stats["pending"], 2)
+            finally:
+                set_queue_db(orig_db)
 
 
 if __name__ == "__main__":

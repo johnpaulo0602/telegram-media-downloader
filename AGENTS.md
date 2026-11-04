@@ -23,10 +23,32 @@ This file provides architectural context, development guidelines, operational co
 telegram-media-downloader/
 ├── src/
 │   ├── __init__.py
-│   └── tbmd.py               # Core application logic, CLI interface, and workers
+│   ├── settings.py           # Centralized configuration & environment loader
+│   ├── models.py             # Enums, dataclasses (QueueItem, QueueStats) & Pydantic DTOs
+│   ├── utils.py              # Pure utilities: filenames, MIME, search, fs browser
+│   ├── queue_db.py           # SQLite persistent queue & history database manager
+│   ├── downloader.py         # Telegram engine, concurrent download workers & sessions
+│   ├── tbmd.py               # Thin CLI entrypoint (`python src/tbmd.py`)
+│   ├── cli/                  # Command-line interface package
+│   │   ├── __init__.py
+│   │   ├── main.py           # CLI argument parsing and main execution loop
+│   │   └── ui.py             # Rich progress tables and Questionary interactive menus
+│   └── web/                  # Web dashboard and FastAPI service
+│       ├── __init__.py       # Web package re-exports
+│       ├── app.py            # FastAPI application, lifespan & WebSocket router
+│       ├── manager.py        # WebDownloadManager (FIFO multi-job coordinator)
+│       └── routes/           # Modular endpoint routers
+│           ├── __init__.py
+│           ├── downloads.py  # /api/downloads, /api/jobs, /api/dialogs
+│           ├── filesystem.py # /api/fs (host/docker filesystem browser)
+│           └── queue.py      # /api/queue (SQLite queue stats, retry, items)
 ├── tests/
 │   ├── __init__.py
-│   └── test_tbmd.py          # Unit test suite
+│   ├── test_models.py        # Domain model and dataclass tests
+│   ├── test_queue_db.py      # SQLite queue and state unit tests
+│   ├── test_settings.py      # Environment configuration loading tests
+│   ├── test_tbmd.py          # Core CLI and download unit test suite
+│   └── test_web.py           # Web endpoints and queue API tests
 ├── .env.example              # Template for required environment variables
 ├── .gitignore                # Git exclusions (credentials, sessions, state, media)
 ├── CONTRIBUTING.md           # Contribution guidelines
@@ -40,15 +62,48 @@ telegram-media-downloader/
 
 ## 3. Core Architecture & Modules
 
+### `src/settings.py`
+Provides typed application configuration:
+- **`Settings`**: Strongly-typed dataclass containing `api_id`, `api_hash`, `session_name`, `download_dir`, `batch_size`, `message_limit`, `db_path`, `web_host`, and `web_port`.
+- **`load_settings()`**: Reads `.env` and validates credentials with helpful error messages.
+
+### `src/models.py`
+Domain and data transfer models:
+- **`QueueStatus` & `JobStatus`**: Enums preventing typos in state transitions.
+- **`QueueItem`**: Dataclass representing individual media items in the SQLite database.
+- **`QueueStats`**: Aggregated queue counters (`pending`, `downloading`, `completed`, `failed`, `skipped`, `cancelled`, `total`).
+- **Pydantic Request Models**: `PreviewRequest`, `StartDownloadRequest`, `QueuePauseRequest`, `MkdirRequest`.
+
+### `src/utils.py`
+Stateless utility functions:
+- Filename sanitization across platforms (`safe_filename`).
+- MIME & media filters (`filter_media_messages`).
+- Channel identifier parsing (`parse_chat_input`).
+- Docker & filesystem browser helpers (`browse_directory`, `get_filesystem_shortcuts`).
+
+### `src/queue_db.py`
+Manages the persistent SQLite database (`tbmd.db`) in WAL mode:
+- **`QueueDatabase`**: Schema creation, bulk item pre-enqueueing (`enqueue_batch`), status transitions, attempt tracking with retries (`max_attempts`), manual batch retries (`retry_failed`), and legacy JSON migration (`import_from_json`).
+
+### `src/downloader.py`
+The core Telegram downloader:
+- **`DownloadSession`**: Holds semaphore, progress callback, and state.
+- **`download_file()`**: Downloads single media messages with event emissions and SQLite status updates.
+- **`download_media_list()`**: Pre-enqueues all discovered media in SQLite first, then processes downloads concurrently.
+
+### `src/cli/`
+CLI user interface and entrypoint:
+- **`src/cli/ui.py`**: Rich tables and Questionary interactive menus.
+- **`src/cli/main.py`**: Argument parser (`--queue-stats`, `--retry-failed`, `--db`, `--web`) and execution loop.
+
 ### `src/tbmd.py`
-The primary module contains:
-- **`load_config()`**: Reads and validates `API_ID`, `API_HASH`, `SESSION_NAME`, `DOWNLOAD_DIR`, `BATCH_SIZE`, and `MESSAGE_LIMIT` from environment variables.
-- **`safe_filename(name, default_ext, max_length)`**: Sanitizes filenames across macOS, Linux, and Windows: removes illegal characters (`:`, `/`, `\`, `*`, `?`, `"`, `<`, `>`, `|`), collapses whitespace/newlines, handles Unicode normalization, and truncates safely while preserving file extensions.
-- **`get_media_filename(message, default_ext)`**: Derives meaningful filenames from message captions, document attributes, or MIME fallbacks, prefixing with `message.id` to prevent collisions.
-- **`load_state()` / `save_state()`**: Manages `download_state.json` to persist downloaded message IDs per chat/channel, enabling idempotent, resumable downloads.
-- **`parse_chat_input(input_val)`**: Resolves user inputs into usable entities (handles `@username`, channel links `https://t.me/...`, numeric IDs, and `-100...` supergroup/channel IDs).
-- **Concurrency & Semaphores**: Uses `asyncio.Semaphore(batch_size)` to control concurrent downloads without triggering Telegram rate limits (`FloodWaitError`).
-- **Interactive UI**: Dialog selection menus, progress monitoring per file worker, overall batch statistics table.
+The only entrypoint (`python src/tbmd.py`): makes the project root importable and delegates to `src.cli.main.run_cli()`. It intentionally re-exports nothing — import from the concrete modules (`src.utils`, `src.downloader`, `src.settings`, `src.queue_db`, `src.cli.main`) instead.
+
+### `src/web/`
+FastAPI web application and homelab dashboard:
+- **`src/web/manager.py`**: `WebDownloadManager` coordinating FIFO jobs, background queue processor, and WebSocket live updates.
+- **`src/web/routes/`**: Cleanly divided routers for downloads, queue management, and filesystem browsing.
+- **`src/web/app.py`**: Application factory, lifespan, and static mounting.
 
 ---
 
@@ -83,7 +138,7 @@ python3 -m unittest discover tests
    - `download_state.json` (local state)
    - `downloads/` directory (actual downloaded media)
 2. **Never hardcode credentials** into tests or source files.
-3. In unit tests involving `tbmd.load_config()`, always mock or patch `load_dotenv` and `os.environ` so tests do not inadvertently read local `.env` files.
+3. In unit tests involving `load_settings()`, call it with `load_env=False` and patch `os.environ` so tests do not inadvertently read local `.env` files.
 
 ---
 

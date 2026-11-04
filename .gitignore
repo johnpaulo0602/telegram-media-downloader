@@ -67,9 +67,12 @@ venv.bak/
 *.session
 *.session-journal
 
-# Download state & downloaded media
+# Download state, SQLite database & downloaded media
 download_state.json
 jobs_history.json
+*.db
+*.db-wal
+*.db-shm
 downloads/
 *.log
 
