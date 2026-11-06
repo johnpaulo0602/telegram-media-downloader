@@ -1,64 +1,206 @@
-# Telegram Batch Media Downloader
+<div align="center">
 
-[![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/)
-[![Telethon](https://img.shields.io/badge/telethon-1.38%2B-green.svg)](https://github.com/LonamiWebs/Telethon)
-[![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-orange.svg)](LICENSE)
+# Telegram Media Downloader
 
-Uma ferramenta de linha de comando em Python, poderosa e confiável, para baixar em lote mídias (vídeos, fotos, PDFs, arquivos compactados e todos os anexos) de canais, grupos e chats privados do Telegram.
+![Python](https://img.shields.io/badge/python-3.8%2B-3776AB?logo=python&logoColor=white)
+![Telethon](https://img.shields.io/badge/telethon-1.38%2B-2AABEE?logo=telegram&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688?logo=fastapi&logoColor=white)
+![Rich](https://img.shields.io/badge/rich-13.7%2B-FAE742?logo=rich&logoColor=white)
+![License](https://img.shields.io/badge/license-GPL--3.0-blue?logo=gnu&logoColor=white)
+![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS%20%7C%20Windows-lightgrey)
+![Docker](https://img.shields.io/badge/docker-compose-ready-2496ED?logo=docker&logoColor=white)
 
-Construída sobre o [Telethon](https://github.com/LonamiWebs/Telethon), com downloads simultâneos, sessões retomáveis, renomeação automática de arquivos e acompanhamento interativo do progresso.
+**Baixe mídias em lote de canais, grupos e chats privados do Telegram.**
+
+CLI em Python com downloads simultâneos, fila persistente em SQLite, retomada de
+downloads interrompidos, renomeação automática de arquivos e um painel web para
+homelab com progresso em tempo real.
+
+[Instalação](#instalação) · [Uso](#uso) · [Arquitetura](#arquitetura) · [Configuração](#configuração)
+
+</div>
 
 ---
 
-## Principais Funcionalidades
+## Sumário
 
-- **Processamento em Lote Simultâneo**: baixa arquivos em paralelo usando um semáforo assíncrono, aproveitando ao máximo a banda sem desrespeitar os limites da API do Telegram.
-- **Downloads Retomáveis (`download_state.json`)**: registra automaticamente os downloads concluídos. Ao reiniciar o script, os arquivos já baixados são ignorados, sem serem baixados novamente.
-- **Resolução Flexível de Canal / Chat**: aceita nomes de usuário de canais (`@canal`), links diretos (`https://t.me/canal`), IDs positivos e IDs completos de canais do Telegram (`-100...`).
-- **Renomeação Inteligente de Arquivos**:
-  - Usa a legenda da mensagem como nome do arquivo, quando disponível.
-  - Na falta dela, usa o nome original do documento no Telegram ou a extensão correspondente ao tipo MIME.
-  - Remove automaticamente caracteres inválidos e quebras de linha problemáticas, e trunca títulos muito longos para garantir compatibilidade com os sistemas de arquivos do macOS, Linux e Windows.
-  - Prefixa os arquivos com o ID da mensagem para evitar colisões de nome quando várias postagens têm a mesma legenda.
-- **Filtragem por Tipo de Mídia**:
-  1. **Imagens** (`.jpg`, `.png` etc.)
-  2. **Vídeos** (`.mp4`, `.mkv` etc.)
-  3. **Documentos PDF** (`.pdf`)
-  4. **ZIP e Arquivos Compactados** (`.zip`, `.rar`, `.7z`, `.tar`, `.gz` etc.)
-  5. **Todos os Tipos de Mídia** (baixa qualquer mensagem que contenha anexos de mídia, ignorando mensagens vazias ou só de texto)
-- **Tratamento de Limite de Requisições e Erros**: lida com o limite de requisições do Telegram (`FloodWaitError`) aguardando exatamente o tempo de penalidade e retomando automaticamente.
+- [Funcionalidades](#funcionalidades)
+- [Arquitetura](#arquitetura)
+- [Fluxo de um download](#fluxo-de-um-download)
+- [Requisitos](#requisitos)
+- [Instalação](#instalação)
+- [Configuração](#configuração)
+- [Uso](#uso)
+  - [Modo interativo](#modo-interativo)
+  - [Linha de comando](#linha-de-comando)
+  - [Interface web](#interface-web-homelab-ui)
+  - [Docker Compose](#docker-compose)
+- [Fila persistente e retomada](#fila-persistente-e-retomada)
+- [API HTTP](#api-http)
+- [Desenvolvimento](#desenvolvimento)
+- [Solução de problemas](#solução-de-problemas)
+- [Contribuindo](#contribuindo)
+- [Licença](#licença)
+
+---
+
+## Funcionalidades
+
+- **Downloads simultâneos** — paralelismo controlado por `asyncio.Semaphore`, aproveitando a banda sem estourar o limite da API do Telegram.
+- **Fila persistente em SQLite** — cada mídia é registrada em `tbmd.db` (modo WAL) com status, tentativas e caminho de destino; a fila sobrevive a reinícios do servidor.
+- **Retomada automática** — downloads concluídos são reconhecidos e ignorados, tanto pelo `download_state.json` quanto pelo banco SQLite.
+- **Resolução flexível de chat** — aceita `@usuario`, `https://t.me/usuario`, IDs numéricos e IDs completos de canal (`-100...`).
+- **Busca de chats sem acento** — a busca ignora maiúsculas e acentos (`musica` encontra "Música") e também casa por username, link ou ID.
+- **Renomeação inteligente** — usa a legenda da mensagem, ou o nome original do documento, ou a extensão do MIME; remove caracteres inválidos, trunca títulos longos e prefixa o ID da mensagem para evitar colisões.
+- **Filtragem por tipo de mídia** — imagens, vídeos, PDFs, ZIP e compactados, áudios e todos os tipos.
+- **Tratamento de `FloodWaitError`** — espera exatamente o tempo de penalidade do Telegram e retoma o download automaticamente.
+- **Painel web para homelab** — fila FIFO de jobs, seleção de canais, explorador de pastas do host/Docker, telemetria de velocidade e disco, e progresso ao vivo via WebSocket.
+- **Interface de linha de comando** — modo interativo com menus ou execução 100% não interativa por flags.
+
+---
+
+## Arquitetura
+
+O projeto separa o **núcleo** (motor de download, fila e utilitários) das
+**interfaces** (CLI e web), de modo que ambas reaproveitam exatamente o mesmo
+código:
+
+```mermaid
+flowchart TB
+    subgraph Entrada["Entrada"]
+        TBMD["src/tbmd.py<br/>entrypoint"]
+    end
+
+    subgraph Interfaces["Interfaces"]
+        CLI["src/cli/main.py<br/>argparse + Questionary"]
+        UI["src/cli/ui.py<br/>tabelas Rich"]
+        APP["src/web/app.py<br/>FastAPI + WebSocket"]
+        MGR["src/web/manager.py<br>FIFO de jobs"]
+        ROTAS["src/web/routes/*<br/>downloads · queue · fs"]
+    end
+
+    subgraph Nucleo["Núcleo (independente da interface)"]
+        SET["src/settings.py<br/>Settings tipadas"]
+        MOD["src/models.py<br/>enums + dataclasses + Pydantic"]
+        UTIL["src/utils.py<br/>nomes, MIME, parsing de chat"]
+        QDB["src/queue_db.py<br/>repositório SQLite"]
+        DL["src/downloader.py<br/>Telethon + workers"]
+    end
+
+    subgraph Externos["Externos"]
+        TG["Telegram<br/>MTProto"]
+        DISCO[("downloads/")]
+        DB[("tbmd.db")]
+    end
+
+    TBMD --> CLI
+    CLI --> UI
+    CLI --> DL
+    CLI --> SET
+
+    APP --> MGR
+    APP --> ROTAS
+    MGR --> DL
+    MGR --> QDB
+    ROTAS --> QDB
+
+    DL --> SET
+    DL --> UTIL
+    DL --> MOD
+    DL --> QDB
+    QDB --> DB
+    DL --> TG
+    DL --> DISCO
+
+    classDef entrada fill:#1e3a5f,stroke:#38bdf8,color:#e0f2fe
+    classDef interface fill:#3f2d5c,stroke:#c084fc,color:#f3e8ff
+    classDef nucleo fill:#1f3f34,stroke:#34d399,color:#ecfdf5
+    classDef externo fill:#4a2626,stroke:#f87171,color:#fee2e2
+
+    class TBMD entrada
+    class CLI,UI,APP,MGR,ROTAS interface
+    class SET,MOD,UTIL,QDB,DL nucleo
+    class TG,DISCO,DB externo
+```
+
+### Módulos
+
+| Módulo | Responsabilidade |
+|---|---|
+| `src/tbmd.py` | Entry point único (`python src/tbmd.py`); delega para `src.cli.main.run_cli()` |
+| `src/settings.py` | Carrega e valida o `.env` em um `Settings` tipado |
+| `src/models.py` | Enums de status, dataclasses (`QueueItem`, `QueueStats`) e DTOs Pydantic |
+| `src/utils.py` | Funções puras: sanitização de nomes, filtros de MIME, parsing de chat, navegador de arquivos |
+| `src/queue_db.py` | Repositório SQLite da fila e do histórico (WAL, retentativas, migração do JSON legado) |
+| `src/downloader.py` | Motor Telethon: sessões, workers concorrentes, eventos de progresso |
+| `src/cli/main.py` | Parser de argumentos e loop principal da CLI |
+| `src/cli/ui.py` | Tabelas Rich e menus interativos Questionary |
+| `src/web/app.py` | Aplicação FastAPI, lifespan e WebSocket |
+| `src/web/manager.py` | `WebDownloadManager`: orquestra jobs FIFO e o processador da fila |
+| `src/web/routes/` | Roteadores separados: `downloads.py`, `queue.py`, `filesystem.py` |
+
+---
+
+## Fluxo de um download
+
+```mermaid
+sequenceDiagram
+    actor U as Usuário
+    participant CLI as CLI / Web UI
+    participant DL as downloader.py
+    participant DB as queue_db.py
+    participant TG as Telegram
+
+    U->>CLI: escolhe chat, tipo e pasta
+    CLI->>TG: busca mensagens (filtro por tipo)
+    TG-->>CLI: lista de mensagens
+    CLI->>DL: download_media_list(mensagens, sessão)
+    DL->>DB: enqueue_batch() — pré-enfileira tudo
+    DB-->>DL: itens enfileirados
+    loop cada mídia (em paralelo, até BATCH_SIZE)
+        DL->>DB: mark_started()
+        DL->>DB: is_downloaded() — já existe?
+        alt já baixado
+            DL->>DB: mark_skipped()
+        else novo
+            DL->>TG: download_media(progresso)
+            TG-->>DL: bytes recebidos
+            DL->>DB: mark_completed()
+        end
+    end
+    CLI-->>U: resumo (baixados, pulados, falhas)
+```
 
 ---
 
 ## Requisitos
 
-- Python 3.8, 3.9, 3.10, 3.11, 3.12, 3.13 ou 3.14+
-- Credenciais de uma conta do Telegram (`API_ID` e `API_HASH`)
+- Python 3.8 a 3.14+
+- Credenciais da API do Telegram (`API_ID` e `API_HASH`)
+- Opcional: Docker + Docker Compose, para a interface web no homelab
 
 ---
 
-## Início Rápido e Instalação
+## Instalação
 
 ### 1. Clone o repositório
 
 ```bash
-git clone https://github.com/mdic/telegram-batch-media-downloader.git
-cd telegram-batch-media-downloader
+git clone https://github.com/johnpaulo0602/telegram-media-downloader.git
+cd telegram-media-downloader
 ```
 
 ### 2. Crie e ative um ambiente virtual
 
-- **macOS / Linux:**
-  ```bash
-  python3 -m venv venv
-  source venv/bin/activate
-  ```
+```bash
+# macOS / Linux
+python3 -m venv venv
+source venv/bin/activate
 
-- **Windows (Prompt de Comando / PowerShell):**
-  ```cmd
-  python -m venv venv
-  venv\Scripts\activate
-  ```
+# Windows (PowerShell)
+python -m venv venv
+venv\Scripts\activate
+```
 
 ### 3. Instale as dependências
 
@@ -69,68 +211,59 @@ pip install -r requirements.txt
 
 ### 4. Configure as variáveis de ambiente
 
-Copie `.env.example` para `.env`:
-
 ```bash
 cp .env.example .env
 ```
 
-Abra o `.env` em um editor de texto e preencha suas credenciais da API do Telegram:
+Preencha `API_ID` e `API_HASH` no `.env`:
 
-```env
-API_ID=1234567
-API_HASH=0123456789abcdef0123456789abcdef
-SESSION_NAME=default_session
-DOWNLOAD_DIR=downloads
-BATCH_SIZE=5
-MESSAGE_LIMIT=2000
-```
+> **Como obter as credenciais:** acesse [my.telegram.org](https://my.telegram.org) com o número da sua conta, abra **API development tools**, preencha o formulário e copie o `api_id` e o `api_hash`.
 
-> **Como obter seu `API_ID` e `API_HASH` do Telegram:**
-> 1. Acesse [https://my.telegram.org](https://my.telegram.org) com o número de telefone da sua conta do Telegram.
-> 2. Clique em **API development tools**.
-> 3. Preencha o formulário curto (título do app e nome curto).
-> 4. Copie o `api_id` e o `api_hash` para o arquivo `.env`.
-
-### 5. Execute o downloader
+### 5. Autentique (uma única vez)
 
 ```bash
-python src/tbmd.py
+python src/tbmd.py --list
 ```
 
-Na primeira execução, o Telethon vai pedir no terminal:
-1. Seu número de telefone (com código do país, ex.: `+55...` ou `+1...`).
-2. O código de confirmação de login enviado ao seu app do Telegram.
-3. Sua senha de verificação em duas etapas (se estiver ativada na sua conta).
-
-Depois de autenticado, a sessão fica salva localmente em `<SESSION_NAME>.session`, então você não precisará fazer login novamente.
+O Telethon pede o número de telefone, o código de login e a senha de verificação em duas etapas. A sessão fica salva em `<SESSION_NAME>.session` e é reutilizada nas próximas execuções.
 
 ---
 
-## Guia de Uso
+## Configuração
+
+| Variável | Padrão | Descrição |
+|---|---|---|
+| `API_ID` | *Obrigatório* | ID numérico da API do Telegram (my.telegram.org) |
+| `API_HASH` | *Obrigatório* | Hash da API do Telegram |
+| `SESSION_NAME` | `default_session` | Nome do arquivo de sessão do Telethon |
+| `DOWNLOAD_DIR` | `downloads` | Pasta base; os arquivos vão para `<DOWNLOAD_DIR>/<tipo>` |
+| `BATCH_SIZE` | `5` | Máximo de downloads simultâneos (recomendado: 3 a 10) |
+| `MESSAGE_LIMIT` | `2000` | Máximo de mensagens inspecionadas (`0` = ilimitado) |
+| `DB_PATH` | `tbmd.db` | Caminho do banco SQLite da fila |
+| `WEB_HOST` | `0.0.0.0` | Host do servidor web |
+| `WEB_PORT` | `8000` | Porta do servidor web |
+
+Pastas de destino por tipo de mídia: `images`, `videos`, `pdfs`, `archives`, `audio` e `all_media`.
+
+---
+
+## Uso
 
 ### Modo interativo
-
-Execute sem argumentos:
 
 ```bash
 python src/tbmd.py
 ```
 
-Os menus são navegados com as setas ↑/↓ e Enter.
+Navegue com as setas ↑/↓ e Enter:
 
-1. **Escolha do chat**: há três formas:
-   - **Listar meus canais e grupos**: mostra uma tabela com nome, tipo, username, ID e mensagens não lidas. Basta digitar o número da linha.
-   - **Buscar pelo nome**: digite parte do nome ou do username. A busca ignora maiúsculas e acentos (`musica` encontra "Música"), e também inclui chats privados e bots.
-   - **Informar username, link ou ID**: `@canalexemplo`, `canalexemplo`, `https://t.me/canalexemplo`, `-1001234567890` ou `1234567890`.
-2. **Tipo de mídia**: Imagens, Vídeos, PDFs, ZIP e arquivos compactados, ou Todos os tipos de mídia.
-3. **Pasta de destino**: o padrão é `<DOWNLOAD_DIR>/<tipo>` (ex.: `downloads/videos`). Você pode digitar qualquer outro caminho, inclusive com `~`, e a tecla Tab completa nomes de pastas.
-4. **Resumo e confirmação**: aparece um painel com o chat, o tipo, a pasta e quantas mídias foram encontradas, antes de começar.
-5. **Progresso**: há uma barra para cada arquivo em andamento (com tamanho, velocidade e tempo restante) e uma barra geral. No final, uma tabela mostra quantos arquivos foram baixados, quantos já existiam e quantos falharam.
+1. **Escolha do chat** — listar canais e grupos, buscar pelo nome, ou informar username, link ou ID.
+2. **Tipo de mídia** — imagens, vídeos, PDFs, compactados, áudios ou todos.
+3. **Pasta de destino** — padrão `<DOWNLOAD_DIR>/<tipo>`; o Tab completa nomes de pasta.
+4. **Resumo e confirmação** — painel com chat, tipo, pasta e quantidade encontrada.
+5. **Progresso** — uma barra por arquivo (tamanho, velocidade, tempo restante) e uma barra geral.
 
-### Linha de comando (sem perguntas)
-
-Todas as escolhas também podem ser passadas como argumentos. O que não for informado é perguntado no modo interativo.
+### Linha de comando
 
 ```bash
 # Lista seus canais e grupos
@@ -139,89 +272,136 @@ python src/tbmd.py --list
 # Busca chats pelo nome
 python src/tbmd.py --search "inglês"
 
-# Baixa todos os vídeos de um canal para uma pasta específica, sem confirmações
+# Baixa todos os vídeos de um canal, sem confirmações
 python src/tbmd.py -c @canalexemplo -t videos -o ~/Videos/curso -y
+
+# Estatísticas da fila SQLite
+python src/tbmd.py --queue-stats
+
+# Re-enfileira itens que falharam
+python src/tbmd.py --retry-failed
 ```
 
 | Opção | Descrição |
 |---|---|
 | `-c`, `--chat` | Username, link ou ID do chat |
-| `-t`, `--type` | `images`, `videos`, `pdfs`, `archives` ou `all` |
-| `-o`, `--output` | Pasta de destino (padrão: `<DOWNLOAD_DIR>/<tipo>`) |
-| `-l`, `--limit` | Máximo de mensagens analisadas (`0` = ilimitado); substitui o `MESSAGE_LIMIT` |
-| `-b`, `--batch-size` | Downloads simultâneos; substitui o `BATCH_SIZE` |
+| `-t`, `--type` | `images`, `videos`, `pdfs`, `archives`, `audios` ou `all` |
+| `-o`, `--output` | Pasta de destino |
+| `-l`, `--limit` | Máximo de mensagens analisadas (`0` = ilimitado) |
+| `-b`, `--batch-size` | Downloads simultâneos |
 | `-y`, `--yes` | Usa a pasta padrão e não pede confirmação |
-| `--list` | Lista seus canais e grupos e sai |
+| `--list` | Lista canais e grupos e sai |
 | `--search TERMO` | Busca chats pelo nome e sai |
-| `--web` | Inicia a interface Web (Homelab UI) |
-| `--host` | Host do servidor Web (padrão: `0.0.0.0`) |
-| `--port` | Porta do servidor Web (padrão: `8000`) |
+| `--queue-stats` | Mostra as estatísticas da fila SQLite e sai |
+| `--retry-failed` | Re-enfileira itens com falha e sai |
+| `--db CAMINHO` | Banco SQLite alternativo |
+| `--web` | Inicia a interface web |
+| `--host` | Host do servidor web |
+| `--port` | Porta do servidor web |
 
-### Interface Web (Homelab UI)
-
-Para usar o painel visual em página única (com seleção de canais, explorador de pastas do servidor/volumes e progresso em tempo real via WebSocket):
+### Interface web (Homelab UI)
 
 ```bash
 python src/tbmd.py --web
-# ou especificar porta:
 python src/tbmd.py --web --port 8080
 ```
 
-Acesse `http://localhost:8000` (ou o IP do seu servidor no homelab).
+Acesse `http://localhost:8000` (ou o IP do servidor no homelab). A interface oferece seleção de canais, fila FIFO de jobs, explorador de pastas do host e dos volumes montados, telemetria de velocidade e disco em tempo real e logs por job.
 
-#### Executando com Docker Compose no Homelab
+### Docker Compose
 
-1. Autentique sua sessão na primeira vez via terminal (`python src/tbmd.py --list`) para gerar o arquivo `default_session.session`.
+1. Autentique a sessão uma vez via terminal (`python src/tbmd.py --list`) para gerar `default_session.session`.
 2. Suba o container:
+
    ```bash
    docker compose up -d --build
    ```
-3. Os volumes mapeados no `docker-compose.yml` (como `/downloads`, `/media`, `/mnt`) aparecem automaticamente nos atalhos do seletor de pastas da interface web.
+
+Os volumes mapeados no `docker-compose.yml` (`/downloads`, `/media`, `/mnt`) aparecem automaticamente nos atalhos do seletor de pastas.
 
 ---
 
-## Referência de Configuração
+## Fila persistente e retomada
 
-| Variável | Padrão | Descrição |
+Todo item baixado é registrado no SQLite (`tbmd.db`, modo WAL) com status, número de tentativas e caminho de destino:
+
+| Status | Significado |
+|---|---|
+| `pending` | Na fila, aguardando worker |
+| `downloading` | Em download no momento |
+| `completed` | Concluído com sucesso |
+| `skipped` | Já existia no disco ou no histórico |
+| `failed` | Falhou após as tentativas configuradas |
+| `cancelled` | Cancelado pelo usuário ou por reinício |
+
+- Interromper com `Ctrl+C` e executar `python src/tbmd.py` novamente retoma de onde parou.
+- Itens com falha podem ser re-enfileirados em lote com `--retry-failed` ou pelo botão **Retry** no painel web.
+- O `download_state.json` legado continua sendo lido e migrado para o SQLite automaticamente.
+
+---
+
+## API HTTP
+
+| Método | Rota | Descrição |
 |---|---|---|
-| `API_ID` | *Obrigatório* | ID da API do Telegram (número inteiro) obtido em my.telegram.org |
-| `API_HASH` | *Obrigatório* | Hash da API do Telegram (texto) obtido em my.telegram.org |
-| `SESSION_NAME` | `default_session` | Nome do arquivo de sessão do Telethon |
-| `DOWNLOAD_DIR` | `downloads` | Pasta base dos downloads; os arquivos vão para `<DOWNLOAD_DIR>/<tipo>` |
-| `BATCH_SIZE` | `5` | Número máximo de downloads simultâneos |
-| `MESSAGE_LIMIT` | `2000` | Máximo de mensagens analisadas no canal (use `0` para ilimitado) |
+| `GET` | `/` | Painel web (single page) |
+| `GET` | `/ws` | WebSocket com o estado ao vivo |
+| `GET` | `/api/status` | Snapshot do estado, ambiente e job ativo |
+| `POST` | `/api/reconnect` | Reconecta ao Telegram |
+| `GET` | `/api/dialogs` | Lista e busca chats |
+| `GET` | `/api/fs` | Navega o sistema de arquivos do host/Docker |
+| `POST` | `/api/fs/mkdir` | Cria uma pasta |
+| `POST` | `/api/downloads/preview` | Pré-visualiza as mídias do chat |
+| `POST` | `/api/downloads/start` | Enfileira um job de download |
+| `POST` | `/api/downloads/cancel` | Cancela o job em andamento |
+| `POST` | `/api/jobs/{id}/cancel` | Cancela um job específico da fila |
+| `POST` | `/api/jobs/{id}/retry` | Re-enfileira um job específico |
+| `POST` | `/api/jobs/{id}/delete` | Remove um job do histórico |
+| `POST` | `/api/jobs/{id}/move-up` | Reordena a fila |
+| `POST` | `/api/jobs/clear-completed` | Limpa jobs concluídos e cancelados |
+| `GET` | `/api/queue/stats` | Estatísticas da fila SQLite |
+| `GET` | `/api/queue/items` | Itens da fila, com filtros e paginação |
+| `POST` | `/api/queue/retry-failed` | Re-enfileira itens com falha |
+| `POST` | `/api/queue/pause` | Pausa ou retoma o processador da fila |
 
 ---
 
-## Retomando Downloads Interrompidos
-
-O downloader registra os downloads concluídos em `download_state.json`:
-- Se a internet cair ou você encerrar o script com `Ctrl+C`, basta executar `python src/tbmd.py` novamente.
-- Os arquivos já baixados serão reconhecidos e ignorados, e o download continua de onde parou.
-
----
-
-## Testes
-
-Execute a suíte de testes automatizados com o `unittest` nativo do Python:
+## Desenvolvimento
 
 ```bash
-python -m unittest discover tests
+python3 -m unittest discover tests
+```
+
+A suíte cobre os modelos de domínio, o banco da fila, o carregamento de
+configurações, a CLI e os endpoints web. Rodar em um ambiente virtual já
+provisionado:
+
+```bash
+.venv/bin/python -m unittest discover tests
 ```
 
 ---
 
-## Solução de Problemas
+## Solução de problemas
 
-- **`Erro de configuração: API_ID não definido no .env`**:
-  Verifique se você copiou `.env.example` para `.env` e definiu tanto `API_ID` quanto `API_HASH`.
-- **`Não foi possível encontrar o chat`**:
-  Se o canal for privado, confirme que sua conta do Telegram já entrou no canal antes de baixar. Use `--search` ou a opção "Buscar pelo nome" para encontrar o chat sem precisar do ID.
-- **`Limite de requisições do Telegram. Aguardando...`**:
-  O Telegram limita temporariamente os downloads de mídia quando muitas requisições são feitas em pouco tempo. O downloader aguarda automaticamente o fim do tempo de espera e retoma. Para reduzir esse limite, diminua o `BATCH_SIZE` para `2` ou `3` no `.env`.
+- **`Erro de configuração: API_ID não definido no .env`** — copie `.env.example` para `.env` e preencha `API_ID` e `API_HASH`.
+- **`Não foi possível encontrar o chat`** — se o canal for privado, confirme que sua conta já entrou nele. Use `--search` para localizar o chat sem saber o ID.
+- **`Limite de requisições do Telegram. Aguardando...`** — o Telegram limita requisições de mídia em rajadas. O downloader espera e retoma sozinho; reduza `BATCH_SIZE` para `2` ou `3` para aliviar.
+- **A porta `8000` já está em uso** — use `python src/tbmd.py --web --port 8080` ou defina `WEB_PORT` no `.env`.
+
+---
+
+## Contribuindo
+
+1. Crie uma branch para a sua mudança.
+2. Mantenha o núcleo (`src/downloader.py`, `src/queue_db.py`, `src/utils.py`) independente das interfaces — a CLI e a web devem consumir os mesmos módulos.
+3. Adicione ou atualize testes em `tests/` ao alterar sanitização de nomes, resolução de chat, estado ou fila.
+4. Rode a suíte antes de abrir o PR.
 
 ---
 
 ## Licença
 
-Este projeto está licenciado sob a [GNU General Public License v3.0](LICENSE).
+Distribuído sob a licença [GNU General Public License v3.0](LICENSE).
+
+Projeto derivado de [mdic/telegram-batch-media-downloader](https://github.com/mdic/telegram-batch-media-downloader), também sob GPL-3.0.
