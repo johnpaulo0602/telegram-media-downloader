@@ -8,7 +8,7 @@ from src.web.app import main as web_main
 
 
 class TestSettings(unittest.TestCase):
-    @patch.dict(os.environ, {"API_ID": "999888", "API_HASH": "my_hash"}, clear=True)
+    @patch.dict(os.environ, {"API_ID": "999888", "API_HASH": "my_hash", "TBMD_SESSION_KEY": "k"}, clear=True)
     def test_load_settings_defaults(self):
         settings, error = load_settings(load_env=False)
         self.assertIsNone(error)
@@ -20,7 +20,7 @@ class TestSettings(unittest.TestCase):
         self.assertEqual(settings.db_path, "tbmd.db")
         self.assertEqual(settings.web_host, "127.0.0.1")
         self.assertEqual(settings.web_port, 8000)
-        self.assertIsNone(settings.session_key)
+        self.assertEqual(settings.session_key, "k")
         self.assertIsNone(settings.web_token)
 
         # to_dict
@@ -39,6 +39,12 @@ class TestSettings(unittest.TestCase):
         settings, error = load_settings(load_env=False)
         self.assertIsNone(settings)
         self.assertIn("API_HASH não definido", error)
+
+    @patch.dict(os.environ, {"API_ID": "123", "API_HASH": "h"}, clear=True)
+    def test_load_settings_missing_session_key(self):
+        settings, error = load_settings(load_env=False)
+        self.assertIsNone(settings)
+        self.assertIn("TBMD_SESSION_KEY", error)
 
     @patch.dict(
         os.environ,

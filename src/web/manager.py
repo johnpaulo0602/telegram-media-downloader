@@ -144,6 +144,8 @@ class WebDownloadManager:
     async def initialize(self):
         """Load settings and connect TelegramClient if credentials exist."""
         settings, err = load_settings()
+        if err and "TBMD_SESSION_KEY" in err:
+            raise RuntimeError(err)
         if err or not settings:
             self.config = None
             self.config_error = err

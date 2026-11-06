@@ -185,24 +185,9 @@
           </button>
         </div>
 
-        <!-- Encryption passphrase -->
-        <div id="auth-passphrase-panel" class="hidden mb-4">
-          <label class="block text-xs font-medium text-slate-300 mb-1.5">Senha de criptografia da sessão</label>
-          <input id="auth-passphrase-input" type="password" autocomplete="off" placeholder="Usada para proteger a sessão no banco"
-            class="w-full bg-bgBase border border-borderSubtle focus:border-telegram rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-telegram" />
-          <p class="text-[11px] text-slate-500 mt-1.5">Guardada apenas em memória. Sem ela a sessão não pode ser salva nem lida do banco.</p>
-        </div>
-
-        <!-- Unlock an existing session -->
-        <div id="auth-unlock-panel" class="hidden">
-          <button onclick="unlockStoredSession()"
-            class="w-full bg-telegram hover:bg-telegramHover text-white font-display font-semibold text-sm px-4 py-2.5 rounded-lg transition-colors">
-            Desbloquear sessão
-          </button>
-          <button onclick="showAuthLogin()"
-            class="mt-2 w-full text-xs text-slate-400 hover:text-slate-200 transition-colors py-2">
-            Fazer login com outra conta
-          </button>
+        <!-- Session locked: TBMD_SESSION_KEY missing or mismatched -->
+        <div id="auth-locked-panel" class="hidden">
+          <p class="text-xs text-amber-300 leading-relaxed" id="auth-locked-msg"></p>
         </div>
 
         <!-- Login flow -->
@@ -2179,11 +2164,6 @@
       el.classList.toggle('hidden', !visible);
     }
 
-    function authPassphrase() {
-      const input = document.getElementById('auth-passphrase-input');
-      return input ? input.value : '';
-    }
-
     async function authPost(path, body) {
       try {
         const res = await fetch(path, {
@@ -2227,8 +2207,7 @@
 
     async function startQrLogin() {
       authSetError('');
-      const passphrase = authPassphrase();
-      const data = await authPost('/api/auth/qr', passphrase ? { passphrase } : {});
+      const data = await authPost('/api/auth/qr', {});
       if (!data) return;
       if (data.qr_png) {
         const img = document.getElementById('auth-qr-image');
@@ -2282,10 +2261,8 @@
     async function requestPhoneCode() {
       authSetError('');
       const input = document.getElementById('auth-phone-input');
-      const passphrase = authPassphrase();
       const data = await authPost('/api/auth/phone', {
-        phone: input ? input.value.trim() : '',
-        ...(passphrase ? { passphrase } : {})
+        phone: input ? input.value.trim() : ''
       });
       if (!data) return;
       authFlow.mode = 'phone';
@@ -2312,15 +2289,6 @@
       authSetError('');
       const input = document.getElementById('auth-password-input');
       const data = await authPost('/api/auth/password', { password: input ? input.value : '' });
-      if (!data) return;
-      if (data.error) { authSetError(data.error); return; }
-      authFlow.step = 'idle';
-      refreshStatus();
-    }
-
-    async function unlockStoredSession() {
-      authSetError('');
-      const data = await authPost('/api/auth/unlock', { passphrase: authPassphrase() });
       if (!data) return;
       if (data.error) { authSetError(data.error); return; }
       authFlow.step = 'idle';
@@ -2366,17 +2334,20 @@
       overlay.classList.remove('hidden');
 
       const locked = auth.status === 'locked';
-      const needsPassphrase = !!auth.needs_passphrase;
 
       authToggle(document.getElementById('auth-token-panel'), authFlow.needsToken);
       authToggle(document.getElementById('auth-login-panel'), !authFlow.needsToken && !locked);
-      authToggle(document.getElementById('auth-unlock-panel'), !authFlow.needsToken && locked);
-      authToggle(document.getElementById('auth-passphrase-panel'), !authFlow.needsToken && needsPassphrase);
+      authToggle(document.getElementById('auth-locked-panel'), !authFlow.needsToken && locked);
+
+      if (locked) {
+        const msg = document.getElementById('auth-locked-msg');
+        msg.textContent = auth.error || 'A sessão não pode ser desbloqueada. Verifique TBMD_SESSION_KEY no .env.';
+      }
 
       document.getElementById('auth-overlay-subtitle').textContent = authFlow.needsToken
         ? 'Informe o token de acesso configurado em TBMD_WEB_TOKEN.'
         : (locked
-          ? 'Há uma sessão guardada no banco. Informe a senha de criptografia para usá-la.'
+          ? 'Há uma sessão guardada no banco, mas ela não pôde ser desbloqueada.'
           : 'Autentique sua conta para começar a baixar.');
 
       const activeCls = 'flex-1 text-xs font-medium py-2 rounded-md transition-colors bg-telegram/15 text-telegram';

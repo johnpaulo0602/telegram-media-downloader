@@ -10,6 +10,13 @@ from src.queue_db import QueueDatabase
 from src.web.auth import TelegramAuthService
 
 
+class TestStartupRequiresSessionKey(unittest.IsolatedAsyncioTestCase):
+    @patch("src.web.manager.load_settings", return_value=(None, "TBMD_SESSION_KEY não definido no .env."))
+    async def test_manager_fails_startup_without_key(self, _load_settings):
+        with self.assertRaisesRegex(RuntimeError, "TBMD_SESSION_KEY"):
+            await web.manager.initialize()
+
+
 class TestAuthServiceState(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -39,7 +46,7 @@ class TestAuthServiceState(unittest.TestCase):
     def test_state_payload_never_leaks_the_key(self):
         state = self.service.state()
         self.assertIn("status", state)
-        self.assertIn("needs_passphrase", state)
+        self.assertNotIn("needs_passphrase", state)
         self.assertNotIn("ciphertext", state)
         self.assertNotIn("salt", state)
 
@@ -78,12 +85,7 @@ class TestAuthEndpoints(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         data = resp.json()
         self.assertEqual(data["status"], "unauthenticated")
-        self.assertTrue(data["needs_passphrase"])
-
-    def test_phone_flow_without_passphrase_is_rejected(self):
-        resp = self.client.post("/api/auth/phone", json={"phone": "+5511999999999"})
-        self.assertEqual(resp.status_code, 400)
-        self.assertIn("TBMD_SESSION_KEY", resp.json()["detail"])
+        self.assertNotIn("needs_passphrase", data)
 
     def test_phone_flow_sends_the_code(self):
         sent = MagicMock()
@@ -94,11 +96,12 @@ class TestAuthEndpoints(unittest.TestCase):
         client.connect = AsyncMock()
         client.send_code_request = AsyncMock(return_value=sent)
         client.disconnect = AsyncMock()
+        web.manager.auth.passphrase = "chave-configurada-no-servidor"
 
         with patch("src.web.auth.TelegramClient", return_value=client):
             resp = self.client.post(
                 "/api/auth/phone",
-                json={"phone": "+5511999999999", "passphrase": "senha-secreta"},
+                json={"phone": "+5511999999999"},
             )
 
         self.assertEqual(resp.status_code, 200)

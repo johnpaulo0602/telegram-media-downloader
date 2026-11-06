@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 class Settings:
     api_id: int | None
     api_hash: str
+    session_key: str
     session_name: str = "default_session"
     download_dir: str = "downloads"
     batch_size: int = 5
@@ -14,7 +15,6 @@ class Settings:
     db_path: str = "tbmd.db"
     web_host: str = "127.0.0.1"
     web_port: int = 8000
-    session_key: str | None = None
     web_token: str | None = None
 
     def to_dict(self) -> dict:
@@ -66,6 +66,12 @@ def load_settings(env_file: str | None = None, load_env: bool = True) -> tuple[S
 
     if not api_hash or not api_hash.strip():
         return None, "API_HASH não definido no .env. Copie o .env.example para .env e configure suas credenciais da API do Telegram."
+
+    if not session_key:
+        return None, (
+            "TBMD_SESSION_KEY não definido no .env. Defina uma senha forte para "
+            "criptografar a sessão do Telegram armazenada no banco SQLite."
+        )
 
     try:
         batch_size = max(1, int(batch_size_raw))

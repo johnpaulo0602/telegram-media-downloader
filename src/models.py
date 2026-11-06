@@ -125,7 +125,6 @@ class QueuePauseRequest(BaseModel):
 
 class PhoneRequest(BaseModel):
     phone: str
-    passphrase: str | None = None
 
 
 class CodeRequest(BaseModel):
@@ -134,10 +133,6 @@ class CodeRequest(BaseModel):
 
 class PasswordRequest(BaseModel):
     password: str
-
-
-class UnlockRequest(BaseModel):
-    passphrase: str = ""
 
 
 class AccessTokenRequest(BaseModel):

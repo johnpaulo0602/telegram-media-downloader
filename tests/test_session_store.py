@@ -10,7 +10,6 @@ from src.session_store import (
     derive_key,
     encrypt,
     migrate_legacy_session,
-    resolve_passphrase,
 )
 
 
@@ -93,22 +92,6 @@ class TestSessionStore(unittest.TestCase):
         self.store.save("1sessionstring", "senha")
         row = self.db.get_session_row()
         self.assertNotIn(b"1sessionstring", row["ciphertext"])
-
-
-class TestPassphraseResolution(unittest.TestCase):
-    def test_explicit_value_wins(self):
-        self.assertEqual(resolve_passphrase("explicita"), "explicita")
-
-    def test_falls_back_to_environment(self):
-        os.environ["TBMD_SESSION_KEY"] = "do-ambiente"
-        try:
-            self.assertEqual(resolve_passphrase(), "do-ambiente")
-        finally:
-            del os.environ["TBMD_SESSION_KEY"]
-
-    def test_returns_none_when_unset(self):
-        os.environ.pop("TBMD_SESSION_KEY", None)
-        self.assertIsNone(resolve_passphrase())
 
 
 class TestLegacyMigration(unittest.TestCase):

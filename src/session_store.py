@@ -6,9 +6,8 @@ and ``StringSession``), so a leaked database or backup would hand over a full
 account session. This module keeps the session inside the SQLite database
 encrypted with AES-256-GCM, using a key derived from a passphrase via scrypt.
 
-The passphrase is never stored: it is provided by the caller, either typed by
-the user in the web UI or read from the ``TBMD_SESSION_KEY`` environment
-variable for unattended setups such as Docker.
+The encryption key is read from ``TBMD_SESSION_KEY`` in the server environment
+and is never supplied by the web UI.
 """
 import os
 import secrets
@@ -136,46 +135,20 @@ def migrate_legacy_session(session_path: str) -> str | None:
         return None
 
 
-def resolve_passphrase(explicit: str | None = None) -> str | None:
-    """
-    Resolve the encryption passphrase: an explicit value wins, otherwise the
-    ``TBMD_SESSION_KEY`` environment variable is used.
-    """
-    if explicit:
-        return explicit
-    env_value = os.getenv("TBMD_SESSION_KEY", "").strip()
-    return env_value or None
-
-
-def open_client_from_store(config: dict[str, Any], db: Any) -> Any | None:
+def open_client_from_store(config: dict[str, Any], db: QueueDatabase) -> TelegramClient | None:
     """
     Build a TelegramClient from the encrypted session in the database.
-    Returns None when no passphrase is configured, no session is stored, or the
-    stored session cannot be decrypted.
+    Returns None only when no session is stored. An incorrect encryption key
+    raises SessionKeyError instead of silently falling back to another session.
     """
-    passphrase = resolve_passphrase(config.get("session_key"))
-    if not passphrase:
-        return None
-
     store = SessionStore(db)
     if not store.has_session():
         return None
 
-    try:
-        session_string = store.load(passphrase)
-    except SessionKeyError:
-        return None
-
+    session_string = store.load(config["session_key"])
     return TelegramClient(StringSession(session_string), config["api_id"], config["api_hash"])
 
 
-def save_client_session(client: Any, db: Any, passphrase: str | None = None) -> bool:
-    """
-    Persist the session of an authorized client, encrypted.
-    Returns True when the session was stored.
-    """
-    key = resolve_passphrase(passphrase)
-    if not key:
-        return False
+def save_client_session(client: TelegramClient, db: QueueDatabase, key: str) -> None:
+    """Persist the session of an authorized client using the configured key."""
     SessionStore(db).save(session_to_string(client.session), key)
-    return True

@@ -32,7 +32,7 @@ from src.downloader import (
     resolve_or_report,
 )
 from src.settings import load_settings
-from src.session_store import open_client_from_store, save_client_session
+from src.session_store import SessionKeyError, open_client_from_store, save_client_session
 from src.utils import MEDIA_TYPES, filter_media_messages, search_dialogs
 
 
@@ -94,15 +94,20 @@ async def main():
 
     state = load_state(db=db)
 
-    client = open_client_from_store(config, db)
+    try:
+        client = open_client_from_store(config, db)
+    except SessionKeyError:
+        console.print("[red]TBMD_SESSION_KEY não corresponde à sessão no banco. Corrija o .env.[/]")
+        return
+
     if client is None:
         client = TelegramClient(config["session_name"], config["api_id"], config["api_hash"])
 
     async with client:
         if not await client.is_user_authorized():
             await client.start()
-            if save_client_session(client, db):
-                console.print("[green]✓[/] Sessão autenticada e guardada no banco SQLite (criptografada).")
+            save_client_session(client, db, config["session_key"])
+            console.print("[green]✓[/] Sessão autenticada e guardada no banco SQLite (criptografada).")
 
         if args.list or args.search:
             dialogs = await fetch_dialogs(client)

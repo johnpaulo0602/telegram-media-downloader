@@ -106,7 +106,7 @@ The only entrypoint (`python src/tbmd.py`): makes the project root importable an
 Encrypted Telegram session storage:
 - **`SessionStore`**: Reads and writes the session in the `telegram_session` table, encrypted with AES-256-GCM (key derived via scrypt).
 - **`derive_key()` / `encrypt()` / `decrypt()`**: Pure crypto primitives; a wrong passphrase raises `SessionKeyError` through the GCM authentication tag.
-- **`resolve_passphrase()`**: Explicit value first, then `TBMD_SESSION_KEY` from the environment.
+- **`TBMD_SESSION_KEY`**: Mandatory server-side environment variable; never accept the encryption key from an API request or web form.
 - **`migrate_legacy_session()`**: Converts a legacy `*.session` file into a string session.
 
 ### `src/web/`
@@ -150,7 +150,7 @@ python3 -m unittest discover tests
    - `downloads/` directory (actual downloaded media)
 2. **Never hardcode credentials** into tests or source files.
 3. In unit tests involving `load_settings()`, call it with `load_env=False` and patch `os.environ` so tests do not inadvertently read local `.env` files.
-4. **Never persist the Telegram session in cleartext.** Use `src/session_store.py` so the `auth_key` is always encrypted at rest. The 2FA password and the encryption passphrase are transient and must never be written to disk or logs.
+4. **Never persist the Telegram session in cleartext.** Use `src/session_store.py` so the `auth_key` is always encrypted at rest. `TBMD_SESSION_KEY` is mandatory and must be read only from the server environment, never from a web form or API request. The 2FA password is transient and must never be written to disk or logs. Protect the local `.env` file, which contains the encryption key.
 
 ---
 

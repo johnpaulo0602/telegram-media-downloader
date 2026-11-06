@@ -224,7 +224,7 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Preencha `API_ID` e `API_HASH` no `.env`:
+Preencha `API_ID`, `API_HASH` e `TBMD_SESSION_KEY` no `.env`:
 
 > **Como obter as credenciais:** acesse [my.telegram.org](https://my.telegram.org) com o número da sua conta, abra **API development tools**, preencha o formulário e copie o `api_id` e o `api_hash`.
 
@@ -234,7 +234,7 @@ Preencha `API_ID` e `API_HASH` no `.env`:
 python src/tbmd.py --list
 ```
 
-O Telethon pede o número de telefone, o código de login e a senha de verificação em duas etapas. A sessão fica salva em `<SESSION_NAME>.session` e é reutilizada nas próximas execuções.
+O Telethon pede o número de telefone, o código de login e, se necessário, a senha de verificação em duas etapas. Após autenticar, a CLI salva a sessão criptografada no banco SQLite. Você também pode iniciar a interface web e autenticar por QR Code sem passar pelo terminal.
 
 ---
 
@@ -249,7 +249,7 @@ O Telethon pede o número de telefone, o código de login e a senha de verifica�
 | `BATCH_SIZE` | `5` | Máximo de downloads simultâneos (recomendado: 3 a 10) |
 | `MESSAGE_LIMIT` | `2000` | Máximo de mensagens inspecionadas (`0` = ilimitado) |
 | `DB_PATH` | `tbmd.db` | Caminho do banco SQLite da fila |
-| `TBMD_SESSION_KEY` | *vazio* | Senha de criptografia da sessão guardada; vazio = perguntar no painel a cada start |
+| `TBMD_SESSION_KEY` | *Obrigatório* | Chave de criptografia da sessão no banco; gere um valor aleatório forte e mantenha-o seguro |
 | `TBMD_WEB_TOKEN` | *vazio* | Token de acesso ao painel; vazio = painel acessível sem token |
 | `WEB_HOST` | `127.0.0.1` | Host do servidor web |
 | `WEB_PORT` | `8000` | Porta do servidor web |
@@ -269,15 +269,16 @@ A sessão do Telegram **é** a autenticação: se ela existir no banco, você j�
 
 ### Como a sessão é guardada
 
-O Telethon grava a `auth_key` de 256 bytes em claro tanto no arquivo `.session` quanto no `StringSession`. Aqui ela é criptografada com **AES-256-GCM**, com a chave derivada da senha de criptografia via **scrypt** (`TBMD_SESSION_KEY`, ou a senha que você digita no painel).
+O Telethon grava a `auth_key` de 256 bytes em claro tanto no arquivo `.session` quanto no `StringSession`. Aqui ela é criptografada com **AES-256-GCM**, com a chave derivada via **scrypt** de `TBMD_SESSION_KEY` no `.env`.
 
-- A senha nunca é gravada: ela fica só em memória e no `.env`.
-- Senha errada é detectada pelo próprio GCM (falha de autenticação), sem verifier separado.
+- `TBMD_SESSION_KEY` é **obrigatória**: a aplicação recusa iniciar sem ela. Gere um valor forte com `python -c "import secrets; print(secrets.token_urlsafe(32))"` e guarde-o no `.env`.
+- A chave **nunca é solicitada no painel web** nem enviada por API; ela é lida somente no servidor a partir do ambiente. Quem tiver acesso ao `.env` poderá descriptografar a sessão, portanto proteja esse arquivo.
+- A chave incorreta é detectada pelo próprio GCM (falha de autenticação). Corrija `TBMD_SESSION_KEY` e reinicie o servidor; não faça login com uma chave diferente sobre a sessão existente.
 - A sessão é revogada no Telegram e apagada do banco pelo botão **Sair** no cabeçalho.
 
 ### Sessão legada
 
-Um `default_session.session` existente é migrado automaticamente para o banco no primeiro start (desde que `TBMD_SESSION_KEY` esteja definido). Sem essa variável, a CLI continua usando o arquivo antigo como sempre.
+Um `default_session.session` existente é migrado automaticamente para o banco no primeiro start. Após a migração, o arquivo legado pode ser removido manualmente do host e o bind mount correspondente no `docker-compose.yml` pode ser retirado.
 
 ### Protegendo o painel
 
@@ -400,7 +401,6 @@ Todo item baixado é registrado no SQLite (`tbmd.db`, modo WAL) com status, núm
 | `POST` | `/api/auth/phone` | Envia o código de login por telefone |
 | `POST` | `/api/auth/code` | Confirma o código recebido |
 | `POST` | `/api/auth/password` | Confirma a senha de 2FA |
-| `POST` | `/api/auth/unlock` | Desbloqueia a sessão com a senha de criptografia |
 | `POST` | `/api/auth/logout` | Revoga a sessão no Telegram e apaga do banco |
 | `POST` | `/api/auth/token` | Valida o token de acesso do painel |
 | `GET` | `/api/dialogs` | Lista e busca chats |

@@ -30,7 +30,6 @@ from src.session_store import (
     SessionKeyError,
     SessionStore,
     migrate_legacy_session,
-    resolve_passphrase,
     session_to_string,
 )
 
@@ -89,15 +88,6 @@ class TelegramAuthService:
     def _config(self) -> dict[str, Any]:
         return self._config_provider() or {}
 
-    def _set_passphrase(self, passphrase: str | None):
-        candidate = (passphrase or "").strip() or None
-        if candidate:
-            self.passphrase = candidate
-        if not self.passphrase:
-            raise AuthError(
-                "Defina TBMD_SESSION_KEY no .env para proteger a sessão antes de fazer login."
-            )
-
     async def restore(self) -> None:
         """
         Reconnect using the stored session. Falls back to the legacy
@@ -105,18 +95,17 @@ class TelegramAuthService:
         """
         config = self._config()
         self.store = SessionStore(self._db_provider())
-        self.passphrase = resolve_passphrase(config.get("session_key"))
+        self.passphrase = config["session_key"]
 
         if self.store.has_session():
-            if not self.passphrase:
-                self.status = AUTH_LOCKED
-                self.error = "Informe a senha de criptografia para desbloquear a sessão."
-                return
             try:
                 session_string = self.store.load(self.passphrase)
-            except SessionKeyError as exc:
+            except SessionKeyError:
                 self.status = AUTH_LOCKED
-                self.error = str(exc)
+                self.error = (
+                    "A senha em TBMD_SESSION_KEY não corresponde à sessão armazenada. "
+                    "Corrija a variável no .env e reinicie o servidor."
+                )
                 return
             await self._connect(session_string)
             return
@@ -125,8 +114,7 @@ class TelegramAuthService:
             os.path.join(PROJECT_ROOT, config.get("session_name", "default_session"))
         )
         if legacy:
-            if self.passphrase:
-                self.store.save(legacy, self.passphrase)
+            self.store.save(legacy, self.passphrase)
             await self._connect(legacy)
             return
 
@@ -189,9 +177,8 @@ class TelegramAuthService:
         await client.connect()
         return client
 
-    async def request_code(self, phone: str, passphrase: str | None = None) -> dict[str, Any]:
+    async def request_code(self, phone: str) -> dict[str, Any]:
         """Send the login code to the given phone number."""
-        self._set_passphrase(passphrase)
         await self._reset_auth_client()
 
         phone = (phone or "").strip()
@@ -256,9 +243,8 @@ class TelegramAuthService:
         await self._finalize(self._auth_client)
         return {"status": AUTH_AUTHORIZED}
 
-    async def start_qr(self, passphrase: str | None = None) -> dict[str, Any]:
+    async def start_qr(self) -> dict[str, Any]:
         """Start a QR login and return the image to display."""
-        self._set_passphrase(passphrase)
         await self._reset_auth_client()
 
         client = await self._new_auth_client()
@@ -313,24 +299,6 @@ class TelegramAuthService:
             "expires_at": self.qr_expires_at,
         }
 
-    async def unlock(self, passphrase: str) -> dict[str, Any]:
-        """Decrypt the stored session with the given passphrase and connect."""
-        if not self.store or not self.store.has_session():
-            raise AuthError("Nenhuma sessão armazenada.")
-
-        self.passphrase = (passphrase or "").strip()
-        if not self.passphrase:
-            raise AuthError("Informe a senha de criptografia.")
-
-        try:
-            session_string = self.store.load(self.passphrase)
-        except SessionKeyError as exc:
-            self.error = str(exc)
-            raise AuthError(str(exc)) from exc
-
-        await self._connect(session_string)
-        return {"status": self.status, "error": self.error}
-
     async def logout(self) -> dict[str, Any]:
         """Revoke the session on Telegram's side and erase it from the database."""
         if self.client is not None:
@@ -357,7 +325,7 @@ class TelegramAuthService:
     async def _finalize(self, client: TelegramClient) -> None:
         """Persist the authorized session encrypted and adopt it as the main client."""
         if not self.passphrase:
-            raise AuthError("Defina uma senha de criptografia para proteger a sessão.")
+            raise AuthError("TBMD_SESSION_KEY não está definida no .env.")
 
         user_info = await self._fetch_user_info(client)
         session_string = session_to_string(client.session)
@@ -382,7 +350,6 @@ class TelegramAuthService:
             "status": self.status,
             "error": self.error,
             "has_session": bool(self.store and self.store.has_session()),
-            "needs_passphrase": not self.passphrase,
             "qr_png": self.qr_png,
             "qr_expires_at": self.qr_expires_at,
         }

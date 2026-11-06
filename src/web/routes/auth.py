@@ -1,6 +1,6 @@
-from fastapi import APIRouter, Body, HTTPException
+from fastapi import APIRouter, HTTPException
 
-from src.models import CodeRequest, PasswordRequest, PhoneRequest, UnlockRequest
+from src.models import CodeRequest, PasswordRequest, PhoneRequest
 from src.web.auth import AuthError
 from src.web.manager import manager
 
@@ -19,24 +19,12 @@ async def api_auth_state():
     return manager.auth.state()
 
 
-@router.post("/unlock")
-async def api_auth_unlock(req: UnlockRequest):
-    """Decrypt the stored session with the given passphrase."""
-    _guard()
-    try:
-        result = await manager.auth.unlock(req.passphrase)
-    except AuthError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    await manager.broadcast_state(force=True)
-    return result
-
-
 @router.post("/phone")
 async def api_auth_phone(req: PhoneRequest):
     """Send the Telegram login code to the given phone number."""
     _guard()
     try:
-        result = await manager.auth.request_code(req.phone, req.passphrase)
+        result = await manager.auth.request_code(req.phone)
     except AuthError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     await manager.broadcast_state(force=True)
@@ -68,20 +56,8 @@ async def api_auth_password(req: PasswordRequest):
 
 
 @router.post("/qr")
-async def api_auth_qr(req: UnlockRequest | None = Body(default=None)):
+async def api_auth_qr():
     """Start a QR login and return the image to display."""
-    _guard()
-    try:
-        result = await manager.auth.start_qr(req.passphrase if req else None)
-    except AuthError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    await manager.broadcast_state(force=True)
-    return result
-
-
-@router.get("/qr/start")
-async def api_auth_qr_start():
-    """Start a QR login without a body, using the configured passphrase."""
     _guard()
     try:
         result = await manager.auth.start_qr()

@@ -156,7 +156,7 @@ class TestConfigLoading(unittest.TestCase):
         self.assertIsNone(settings)
         self.assertIn("número inteiro válido", error)
 
-    @patch.dict(os.environ, {"API_ID": "123456", "API_HASH": "secret_hash", "BATCH_SIZE": "10"}, clear=True)
+    @patch.dict(os.environ, {"API_ID": "123456", "API_HASH": "secret_hash", "BATCH_SIZE": "10", "TBMD_SESSION_KEY": "k"}, clear=True)
     def test_valid_config(self):
         settings, error = load_settings(load_env=False)
         self.assertIsNone(error)
@@ -167,7 +167,7 @@ class TestConfigLoading(unittest.TestCase):
         self.assertEqual(config["session_name"], "default_session")
         self.assertEqual(config["download_dir"], "downloads")
 
-    @patch.dict(os.environ, {"API_ID": "1", "API_HASH": "h", "DOWNLOAD_DIR": "/tmp/tg"}, clear=True)
+    @patch.dict(os.environ, {"API_ID": "1", "API_HASH": "h", "DOWNLOAD_DIR": "/tmp/tg", "TBMD_SESSION_KEY": "k"}, clear=True)
     def test_custom_download_dir(self):
         settings, _ = load_settings(load_env=False)
         self.assertEqual(settings.download_dir, "/tmp/tg")
