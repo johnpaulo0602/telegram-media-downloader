@@ -2227,7 +2227,8 @@
 
     async function startQrLogin() {
       authSetError('');
-      const data = await authPost('/api/auth/qr', { passphrase: authPassphrase() });
+      const passphrase = authPassphrase();
+      const data = await authPost('/api/auth/qr', passphrase ? { passphrase } : {});
       if (!data) return;
       if (data.qr_png) {
         const img = document.getElementById('auth-qr-image');
@@ -2281,9 +2282,10 @@
     async function requestPhoneCode() {
       authSetError('');
       const input = document.getElementById('auth-phone-input');
+      const passphrase = authPassphrase();
       const data = await authPost('/api/auth/phone', {
         phone: input ? input.value.trim() : '',
-        passphrase: authPassphrase()
+        ...(passphrase ? { passphrase } : {})
       });
       if (!data) return;
       authFlow.mode = 'phone';

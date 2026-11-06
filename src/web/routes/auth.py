@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Body, HTTPException
 
 from src.models import CodeRequest, PasswordRequest, PhoneRequest, UnlockRequest
 from src.web.auth import AuthError
@@ -68,11 +68,23 @@ async def api_auth_password(req: PasswordRequest):
 
 
 @router.post("/qr")
-async def api_auth_qr(req: UnlockRequest | None = None):
+async def api_auth_qr(req: UnlockRequest | None = Body(default=None)):
     """Start a QR login and return the image to display."""
     _guard()
     try:
         result = await manager.auth.start_qr(req.passphrase if req else None)
+    except AuthError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await manager.broadcast_state(force=True)
+    return result
+
+
+@router.get("/qr/start")
+async def api_auth_qr_start():
+    """Start a QR login without a body, using the configured passphrase."""
+    _guard()
+    try:
+        result = await manager.auth.start_qr()
     except AuthError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     await manager.broadcast_state(force=True)

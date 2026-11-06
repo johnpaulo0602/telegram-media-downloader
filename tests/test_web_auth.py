@@ -83,7 +83,7 @@ class TestAuthEndpoints(unittest.TestCase):
     def test_phone_flow_without_passphrase_is_rejected(self):
         resp = self.client.post("/api/auth/phone", json={"phone": "+5511999999999"})
         self.assertEqual(resp.status_code, 400)
-        self.assertIn("criptografia", resp.json()["detail"])
+        self.assertIn("TBMD_SESSION_KEY", resp.json()["detail"])
 
     def test_phone_flow_sends_the_code(self):
         sent = MagicMock()

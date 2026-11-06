@@ -95,7 +95,7 @@ class TelegramAuthService:
             self.passphrase = candidate
         if not self.passphrase:
             raise AuthError(
-                "Defina uma senha de criptografia para proteger a sessão antes de fazer login."
+                "Defina TBMD_SESSION_KEY no .env para proteger a sessão antes de fazer login."
             )
 
     async def restore(self) -> None:

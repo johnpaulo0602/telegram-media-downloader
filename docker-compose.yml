@@ -9,13 +9,13 @@ services:
       - .env
     environment:
       - DOWNLOAD_DIR=/downloads
+      - DB_PATH=/app/data/tbmd.db
       - WEB_HOST=0.0.0.0
       - WEB_PORT=8000
     volumes:
-      # Sessão autenticada do Telethon + fila SQLite (geradas na 1ª vez pelo painel web)
-      - ./tbmd.db:/app/tbmd.db
-      - ./tbmd.db-wal:/app/tbmd.db-wal
-      - ./tbmd.db-shm:/app/tbmd.db-shm
+      # Sessão autenticada do Telegram + fila SQLite (volume nomeado, evita
+      # conflito de permissões do WAL com o bind mount do host)
+      - tbmd-data:/app/data
       # Sessão legada do Telethon (usada apenas para a migração inicial)
       - ./default_session.session:/app/default_session.session
       # Pasta padrão de downloads mapeada para o host/homelab
@@ -23,3 +23,6 @@ services:
       # Exemplos de volumes extras do Homelab / NAS que aparecerão automaticamente na Web UI:
       # - /mnt/storage/media:/media
       # - /mnt/nas:/mnt/nas
+
+volumes:
+  tbmd-data:

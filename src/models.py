@@ -137,7 +137,7 @@ class PasswordRequest(BaseModel):
 
 
 class UnlockRequest(BaseModel):
-    passphrase: str
+    passphrase: str = ""
 
 
 class AccessTokenRequest(BaseModel):
