@@ -46,6 +46,7 @@ homelab com progresso em tempo real.
 
 ## Funcionalidades
 
+- **Autenticação pela própria sessão do Telegram** — faça login no painel web por QR Code ou telefone; a sessão fica guardada **criptografada** no SQLite (AES-256-GCM), sem arquivo `.session` solto em disco.
 - **Downloads simultâneos** — paralelismo controlado por `asyncio.Semaphore`, aproveitando a banda sem estourar o limite da API do Telegram.
 - **Fila persistente em SQLite** — cada mídia é registrada em `tbmd.db` (modo WAL) com status, tentativas e caminho de destino; a fila sobrevive a reinícios do servidor.
 - **Retomada automática** — downloads concluídos são reconhecidos e ignorados, tanto pelo `download_state.json` quanto pelo banco SQLite.
@@ -76,7 +77,8 @@ flowchart TB
         UI["src/cli/ui.py<br/>tabelas Rich"]
         APP["src/web/app.py<br/>FastAPI + WebSocket"]
         MGR["src/web/manager.py<br>FIFO de jobs"]
-        ROTAS["src/web/routes/*<br/>downloads · queue · fs"]
+        AUTH["src/web/auth.py<br/>QR / telefone + 2FA"]
+        ROTAS["src/web/routes/*<br/>auth · downloads · queue · fs"]
     end
 
     subgraph Nucleo["Núcleo (independente da interface)"]
@@ -85,6 +87,7 @@ flowchart TB
         UTIL["src/utils.py<br/>nomes, MIME, parsing de chat"]
         QDB["src/queue_db.py<br/>repositório SQLite"]
         DL["src/downloader.py<br/>Telethon + workers"]
+        SS["src/session_store.py<br/>AES-256-GCM + scrypt"]
     end
 
     subgraph Externos["Externos"]
@@ -97,17 +100,22 @@ flowchart TB
     CLI --> UI
     CLI --> DL
     CLI --> SET
+    CLI --> SS
 
     APP --> MGR
     APP --> ROTAS
     MGR --> DL
     MGR --> QDB
+    MGR --> AUTH
     ROTAS --> QDB
+    ROTAS --> AUTH
 
     DL --> SET
     DL --> UTIL
     DL --> MOD
     DL --> QDB
+    AUTH --> SS
+    SS --> QDB
     QDB --> DB
     DL --> TG
     DL --> DISCO
@@ -118,8 +126,8 @@ flowchart TB
     classDef externo fill:#4a2626,stroke:#f87171,color:#fee2e2
 
     class TBMD entrada
-    class CLI,UI,APP,MGR,ROTAS interface
-    class SET,MOD,UTIL,QDB,DL nucleo
+    class CLI,UI,APP,MGR,ROTAS,AUTH interface
+    class SET,MOD,UTIL,QDB,DL,SS nucleo
     class TG,DISCO,DB externo
 ```
 
@@ -132,6 +140,7 @@ flowchart TB
 | `src/models.py` | Enums de status, dataclasses (`QueueItem`, `QueueStats`) e DTOs Pydantic |
 | `src/utils.py` | Funções puras: sanitização de nomes, filtros de MIME, parsing de chat, navegador de arquivos |
 | `src/queue_db.py` | Repositório SQLite da fila e do histórico (WAL, retentativas, migração do JSON legado) |
+| `src/session_store.py` | Sessão do Telegram criptografada em repouso (AES-256-GCM, chave via scrypt) |
 | `src/downloader.py` | Motor Telethon: sessões, workers concorrentes, eventos de progresso |
 | `src/cli/main.py` | Parser de argumentos e loop principal da CLI |
 | `src/cli/ui.py` | Tabelas Rich e menus interativos Questionary |
@@ -240,10 +249,47 @@ O Telethon pede o número de telefone, o código de login e a senha de verifica�
 | `BATCH_SIZE` | `5` | Máximo de downloads simultâneos (recomendado: 3 a 10) |
 | `MESSAGE_LIMIT` | `2000` | Máximo de mensagens inspecionadas (`0` = ilimitado) |
 | `DB_PATH` | `tbmd.db` | Caminho do banco SQLite da fila |
-| `WEB_HOST` | `0.0.0.0` | Host do servidor web |
+| `TBMD_SESSION_KEY` | *vazio* | Senha de criptografia da sessão guardada; vazio = perguntar no painel a cada start |
+| `TBMD_WEB_TOKEN` | *vazio* | Token de acesso ao painel; vazio = painel acessível sem token |
+| `WEB_HOST` | `127.0.0.1` | Host do servidor web |
 | `WEB_PORT` | `8000` | Porta do servidor web |
 
 Pastas de destino por tipo de mídia: `images`, `videos`, `pdfs`, `archives`, `audio` e `all_media`.
+
+---
+
+## Autenticação
+
+A sessão do Telegram **é** a autenticação: se ela existir no banco, você já entra; se não, o painel mostra a tela de login.
+
+### Fluxo no painel web
+
+1. **QR Code** (recomendado) — abra o Telegram no celular em **Ajustes → Aparelhos → Conectar dispositivo** e escaneie o código exibido no painel. É o mesmo mecanismo usado pelo Telegram Desktop, não exige digitar telefone nem código.
+2. **Telefone** — informe o número com código do país, receba o código no Telegram e, se sua conta tiver verificação em duas etapas, digite a senha de 2FA.
+
+### Como a sessão é guardada
+
+O Telethon grava a `auth_key` de 256 bytes em claro tanto no arquivo `.session` quanto no `StringSession`. Aqui ela é criptografada com **AES-256-GCM**, com a chave derivada da senha de criptografia via **scrypt** (`TBMD_SESSION_KEY`, ou a senha que você digita no painel).
+
+- A senha nunca é gravada: ela fica só em memória e no `.env`.
+- Senha errada é detectada pelo próprio GCM (falha de autenticação), sem verifier separado.
+- A sessão é revogada no Telegram e apagada do banco pelo botão **Sair** no cabeçalho.
+
+### Sessão legada
+
+Um `default_session.session` existente é migrado automaticamente para o banco no primeiro start (desde que `TBMD_SESSION_KEY` esteja definido). Sem essa variável, a CLI continua usando o arquivo antigo como sempre.
+
+### Protegendo o painel
+
+Como a sessão do Telegram dá acesso total à conta, **defina `TBMD_WEB_TOKEN`** ao expor o painel na rede:
+
+```env
+TBMD_WEB_TOKEN=um-token-longo-e-aleatorio
+```
+
+Sem o token, a API responde `401` e o painel pede o acesso. Depois de autenticado, o navegador recebe um cookie `httpOnly`. Acesse também por `http://servidor:8000/?token=um-token-longo-e-aleatorio` para entrar direto.
+
+O `WEB_HOST` padrão é `127.0.0.1` — ao publicar na rede, troque para `0.0.0.0` **e** defina o token.
 
 ---
 
@@ -348,6 +394,15 @@ Todo item baixado é registrado no SQLite (`tbmd.db`, modo WAL) com status, núm
 | `GET` | `/ws` | WebSocket com o estado ao vivo |
 | `GET` | `/api/status` | Snapshot do estado, ambiente e job ativo |
 | `POST` | `/api/reconnect` | Reconecta ao Telegram |
+| `GET` | `/api/auth/state` | Estado da autenticação (usado pelo painel) |
+| `POST` | `/api/auth/qr` | Inicia o login por QR Code |
+| `GET` | `/api/auth/qr/status` | Progresso do login por QR Code |
+| `POST` | `/api/auth/phone` | Envia o código de login por telefone |
+| `POST` | `/api/auth/code` | Confirma o código recebido |
+| `POST` | `/api/auth/password` | Confirma a senha de 2FA |
+| `POST` | `/api/auth/unlock` | Desbloqueia a sessão com a senha de criptografia |
+| `POST` | `/api/auth/logout` | Revoga a sessão no Telegram e apaga do banco |
+| `POST` | `/api/auth/token` | Valida o token de acesso do painel |
 | `GET` | `/api/dialogs` | Lista e busca chats |
 | `GET` | `/api/fs` | Navega o sistema de arquivos do host/Docker |
 | `POST` | `/api/fs/mkdir` | Cria uma pasta |
