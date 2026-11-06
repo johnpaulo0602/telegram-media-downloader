@@ -32,6 +32,7 @@ from src.downloader import (
     resolve_or_report,
 )
 from src.settings import load_settings
+from src.session_store import open_client_from_store, save_client_session
 from src.utils import MEDIA_TYPES, filter_media_messages, search_dialogs
 
 
@@ -53,7 +54,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--retry-failed", action="store_true", help="re-enfileira itens que falharam anteriormente no banco SQLite")
     parser.add_argument("--db", default=None, help="caminho do banco SQLite (padrão: tbmd.db ou $DB_PATH)")
     parser.add_argument("--web", action="store_true", help="inicia a interface web (homelab UI)")
-    parser.add_argument("--host", default=os.getenv("WEB_HOST", "0.0.0.0"), help="host do servidor web (padrão: 0.0.0.0)")
+    parser.add_argument("--host", default=os.getenv("WEB_HOST", "127.0.0.1"), help="host do servidor web (padrão: 127.0.0.1)")
     parser.add_argument("--port", type=int, default=int(os.getenv("WEB_PORT", "8000")), help="porta do servidor web (padrão: 8000)")
     return parser
 
@@ -93,7 +94,16 @@ async def main():
 
     state = load_state(db=db)
 
-    async with TelegramClient(config["session_name"], config["api_id"], config["api_hash"]) as client:
+    client = open_client_from_store(config, db)
+    if client is None:
+        client = TelegramClient(config["session_name"], config["api_id"], config["api_hash"])
+
+    async with client:
+        if not await client.is_user_authorized():
+            await client.start()
+            if save_client_session(client, db):
+                console.print("[green]✓[/] Sessão autenticada e guardada no banco SQLite (criptografada).")
+
         if args.list or args.search:
             dialogs = await fetch_dialogs(client)
             if args.search:

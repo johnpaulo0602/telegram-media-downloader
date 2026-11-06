@@ -32,7 +32,10 @@ def get_queue_db(db_path: str | None = None) -> QueueDatabase:
     """Return the global QueueDatabase instance or create one with a custom path."""
     global _queue_db
     if db_path is not None:
-        return QueueDatabase(db_path)
+        if _queue_db is not None and os.path.abspath(_queue_db.db_path) == os.path.abspath(db_path):
+            return _queue_db
+        _queue_db = QueueDatabase(db_path)
+        return _queue_db
     if _queue_db is None:
         db_path_env = os.getenv("DB_PATH", os.getenv("DB_FILE", DEFAULT_DB_FILE)).strip() or DEFAULT_DB_FILE
         _queue_db = QueueDatabase(db_path_env)

@@ -20,7 +20,9 @@ from src.models import (
     PreviewRequest,
     StartDownloadRequest,
 )
+from src.queue_db import QueueDatabase
 from src.settings import load_settings
+from src.web.auth import TelegramAuthService
 from src.utils import (
     MEDIA_TYPES,
     dialog_kind,
@@ -45,6 +47,8 @@ class WebDownloadManager:
         self.connected: bool = False
         self.authorized: bool = False
         self.user_info: dict | None = None
+        self.db: QueueDatabase | None = None
+        self.auth = TelegramAuthService(lambda: self.config, lambda: self.db)
         self.dialogs_cache: list = []
         self.dialogs_updated_at: float = 0.0
 
@@ -149,38 +153,33 @@ class WebDownloadManager:
 
         self.config = settings.to_dict()
         self.config_error = None
+        self.db = get_queue_db(self.config.get("db_path"))
 
-        session_path = os.path.join(PROJECT_ROOT, self.config["session_name"])
         if self.client is not None:
             try:
                 await self.client.disconnect()
             except Exception:
                 pass
+            self.client = None
 
-        self.client = TelegramClient(
-            session_path,
-            self.config["api_id"],
-            self.config["api_hash"],
-        )
-        try:
-            await self.client.connect()
-            self.connected = True
-            self.authorized = await self.client.is_user_authorized()
-            if self.authorized:
-                me = await self.client.get_me()
-                self.user_info = {
-                    "id": me.id,
-                    "name": utils.get_display_name(me),
-                    "username": getattr(me, "username", None),
-                    "phone": getattr(me, "phone", None),
-                }
-                self._ensure_queue_processor()
-            else:
-                self.user_info = None
-        except Exception as e:
-            self.connected = False
-            self.authorized = False
-            self.config_error = f"Falha ao conectar ao Telegram: {str(e)}"
+        self.connected = False
+        self.authorized = False
+        self.user_info = None
+
+        await self.auth.restore()
+
+        self.client = self.auth.client
+        self.connected = self.auth.client is not None
+        self.authorized = self.auth.authorized
+        self.user_info = self.auth.user_info
+        if self.authorized:
+            self._ensure_queue_processor()
+
+    def get_db(self) -> QueueDatabase:
+        """Return the shared queue database instance."""
+        if self.db is None:
+            self.db = get_queue_db((self.config or {}).get("db_path"))
+        return self.db
 
     async def shutdown(self):
         if self.active_Session:
@@ -327,6 +326,7 @@ class WebDownloadManager:
                 "user": self.user_info,
                 "error": self.config_error,
                 "session_name": (self.config or {}).get("session_name", "default_session"),
+                "auth": self.auth.state(),
             },
             "environment": {
                 "is_docker": is_running_in_docker(),

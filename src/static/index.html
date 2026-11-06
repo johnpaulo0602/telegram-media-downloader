@@ -4,6 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Telegram Media Downloader — Operações &amp; Fila</title>
+  <link rel="icon" type="image/x-icon" href="/static/favicon.ico" />
   <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -125,6 +126,11 @@
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
             </svg>
           </button>
+          <button onclick="logoutTelegram()" title="Encerrar sessão do Telegram" class="ml-1 text-slate-400 hover:text-rose-300 transition-colors">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"></path>
+            </svg>
+          </button>
         </div>
       </div>
     </div>
@@ -137,8 +143,8 @@
         <strong class="font-semibold text-amber-100">Sessão do Telegram não autenticada:</strong>
         <span id="auth-alert-msg">Autentique primeiro no terminal com <code class="font-mono bg-black/40 px-1.5 py-0.5 rounded">python src/tbmd.py</code> para criar o arquivo <code class="font-mono">.session</code>.</span>
       </div>
-      <button onclick="reconnectTelegram()" class="self-start sm:self-auto px-3 py-1 rounded bg-amber-500/20 hover:bg-amber-500/30 border border-amber-400/40 text-amber-100 font-medium transition">
-        Tentar Novamente
+      <button onclick="showAuthLogin()" class="self-start sm:self-auto px-3 py-1 rounded bg-amber-500/20 hover:bg-amber-500/30 border border-amber-400/40 text-amber-100 font-medium transition">
+        Entrar com o Telegram
       </button>
     </div>
   </div>
@@ -152,6 +158,118 @@
           <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path>
         </svg>
         <span><strong>FloodWait ativo:</strong> o Telegram solicitou pausa temporária de <span id="flood-seconds" class="font-mono font-bold">0</span>s. O job retomará automaticamente.</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- AUTH OVERLAY (Telegram login / unlock) -->
+  <div id="auth-overlay" class="hidden fixed inset-0 z-[100] bg-bgBase/95 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto">
+    <div class="w-full max-w-md bg-bgSurface border border-borderSubtle rounded-xl shadow-2xl my-8">
+      <div class="px-6 pt-6 pb-5 border-b border-borderSubtle text-center">
+        <img src="/static/logo.png" alt="Telegram Media Downloader" class="w-12 h-12 mx-auto mb-3 rounded-xl" onerror="this.style.display='none'" />
+        <h2 class="font-display font-bold text-lg text-white">Conectar ao Telegram</h2>
+        <p class="text-xs text-slate-400 mt-1" id="auth-overlay-subtitle">Autentique sua conta para começar a baixar.</p>
+      </div>
+
+      <div class="p-6">
+        <div id="auth-error" class="hidden mb-4 text-xs px-3 py-2 rounded-lg bg-rose-950/60 border border-rose-800/60 text-rose-300"></div>
+
+        <!-- Access token (when TBMD_WEB_TOKEN is set) -->
+        <div id="auth-token-panel" class="hidden">
+          <label class="block text-xs font-medium text-slate-300 mb-1.5">Token de acesso do painel</label>
+          <input id="auth-token-input" type="password" autocomplete="off" placeholder="Cole o TBMD_WEB_TOKEN"
+            class="w-full bg-bgBase border border-borderSubtle focus:border-telegram rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-telegram" />
+          <button onclick="submitAccessToken()"
+            class="mt-3 w-full bg-telegram hover:bg-telegramHover text-white font-display font-semibold text-sm px-4 py-2.5 rounded-lg transition-colors">
+            Desbloquear painel
+          </button>
+        </div>
+
+        <!-- Encryption passphrase -->
+        <div id="auth-passphrase-panel" class="hidden mb-4">
+          <label class="block text-xs font-medium text-slate-300 mb-1.5">Senha de criptografia da sessão</label>
+          <input id="auth-passphrase-input" type="password" autocomplete="off" placeholder="Usada para proteger a sessão no banco"
+            class="w-full bg-bgBase border border-borderSubtle focus:border-telegram rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-telegram" />
+          <p class="text-[11px] text-slate-500 mt-1.5">Guardada apenas em memória. Sem ela a sessão não pode ser salva nem lida do banco.</p>
+        </div>
+
+        <!-- Unlock an existing session -->
+        <div id="auth-unlock-panel" class="hidden">
+          <button onclick="unlockStoredSession()"
+            class="w-full bg-telegram hover:bg-telegramHover text-white font-display font-semibold text-sm px-4 py-2.5 rounded-lg transition-colors">
+            Desbloquear sessão
+          </button>
+          <button onclick="showAuthLogin()"
+            class="mt-2 w-full text-xs text-slate-400 hover:text-slate-200 transition-colors py-2">
+            Fazer login com outra conta
+          </button>
+        </div>
+
+        <!-- Login flow -->
+        <div id="auth-login-panel">
+          <div class="flex gap-1 p-1 bg-bgBase rounded-lg border border-borderSubtle mb-5">
+            <button id="auth-tab-qr" onclick="switchAuthMode('qr')"
+              class="flex-1 text-xs font-medium py-2 rounded-md transition-colors">QR Code</button>
+            <button id="auth-tab-phone" onclick="switchAuthMode('phone')"
+              class="flex-1 text-xs font-medium py-2 rounded-md transition-colors">Telefone</button>
+          </div>
+
+          <!-- QR -->
+          <div id="auth-qr-panel" class="hidden">
+            <div class="flex justify-center mb-4">
+              <div class="p-3 bg-white rounded-xl">
+                <img id="auth-qr-image" alt="QR Code de login" class="w-48 h-48 hidden" />
+                <div id="auth-qr-spinner" class="w-48 h-48 flex items-center justify-center text-xs text-slate-500 text-center px-4">
+                  Gerando QR code...
+                </div>
+              </div>
+            </div>
+            <p class="text-xs text-slate-400 text-center leading-relaxed">
+              No Telegram do celular, abra <strong class="text-slate-200">Ajustes → Aparelhos → Conectar dispositivo</strong> e escaneie o código.
+            </p>
+            <button onclick="startQrLogin()"
+              class="mt-4 w-full text-xs text-slate-400 hover:text-slate-200 transition-colors py-2">
+              Gerar novo QR code
+            </button>
+          </div>
+
+          <!-- Phone -->
+          <div id="auth-phone-panel" class="hidden">
+            <div id="auth-phone-step" class="hidden">
+              <label class="block text-xs font-medium text-slate-300 mb-1.5">Telefone com código do país</label>
+              <input id="auth-phone-input" type="tel" autocomplete="tel" placeholder="+5511999999999"
+                class="w-full bg-bgBase border border-borderSubtle focus:border-telegram rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-telegram" />
+              <button onclick="requestPhoneCode()"
+                class="mt-3 w-full bg-telegram hover:bg-telegramHover text-white font-display font-semibold text-sm px-4 py-2.5 rounded-lg transition-colors">
+                Enviar código
+              </button>
+            </div>
+
+            <div id="auth-code-step" class="hidden">
+              <label class="block text-xs font-medium text-slate-300 mb-1.5">Código enviado no Telegram</label>
+              <input id="auth-code-input" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="12345"
+                class="w-full bg-bgBase border border-borderSubtle focus:border-telegram rounded-lg px-3 py-2.5 text-sm tracking-widest text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-telegram" />
+              <button onclick="submitAuthCode()"
+                class="mt-3 w-full bg-telegram hover:bg-telegramHover text-white font-display font-semibold text-sm px-4 py-2.5 rounded-lg transition-colors">
+                Confirmar código
+              </button>
+              <button onclick="switchAuthMode('qr')"
+                class="mt-2 w-full text-xs text-slate-400 hover:text-slate-200 transition-colors py-2">
+                Usar QR code
+              </button>
+            </div>
+
+            <div id="auth-password-step" class="hidden">
+              <label class="block text-xs font-medium text-slate-300 mb-1.5">Senha de verificação em duas etapas</label>
+              <input id="auth-password-input" type="password" autocomplete="current-password" placeholder="Sua senha do 2FA"
+                class="w-full bg-bgBase border border-borderSubtle focus:border-telegram rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-telegram" />
+              <button onclick="submitAuthPassword()"
+                class="mt-3 w-full bg-telegram hover:bg-telegramHover text-white font-display font-semibold text-sm px-4 py-2.5 rounded-lg transition-colors">
+                Confirmar senha
+              </button>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -889,8 +1007,13 @@
         tgDot.className = 'w-2 h-2 rounded-full bg-rose-400';
         tgText.textContent = 'Sessão Desconectada';
         authAlert.classList.remove('hidden');
-        if (tg.error) {
+        const authError = tg.auth && tg.auth.error;
+        if (authError) {
+          document.getElementById('auth-alert-msg').textContent = authError;
+        } else if (tg.error) {
           document.getElementById('auth-alert-msg').textContent = tg.error;
+        } else {
+          document.getElementById('auth-alert-msg').textContent = 'Use o botão abaixo para entrar com sua conta do Telegram.';
         }
       }
 
@@ -2037,11 +2160,253 @@
       }
     }
 
+    // --- AUTH OVERLAY ---
+    let authFlow = { mode: 'qr', step: 'idle', busy: false, needsToken: false, qrTimer: null };
+
+    function authSetError(message) {
+      const box = document.getElementById('auth-error');
+      if (!box) return;
+      if (message) {
+        box.textContent = message;
+        box.classList.remove('hidden');
+      } else {
+        box.classList.add('hidden');
+      }
+    }
+
+    function authToggle(el, visible) {
+      if (!el) return;
+      el.classList.toggle('hidden', !visible);
+    }
+
+    function authPassphrase() {
+      const input = document.getElementById('auth-passphrase-input');
+      return input ? input.value : '';
+    }
+
+    async function authPost(path, body) {
+      try {
+        const res = await fetch(path, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body || {})
+        });
+        let data = {};
+        try { data = await res.json(); } catch (_) {}
+        if (res.status === 401) {
+          authFlow.needsToken = true;
+          renderAuthOverlay();
+          return null;
+        }
+        if (!res.ok) {
+          authSetError((data && data.detail) || 'Não foi possível concluir a operação.');
+          return null;
+        }
+        return data;
+      } catch (err) {
+        authSetError(err.message || String(err));
+        return null;
+      }
+    }
+
+    function switchAuthMode(mode) {
+      authFlow.mode = mode;
+      authFlow.step = 'idle';
+      authSetError('');
+      renderAuthOverlay();
+      if (mode === 'qr') startQrLogin();
+    }
+
+    function showAuthLogin() {
+      authFlow.mode = 'qr';
+      authFlow.step = 'idle';
+      authSetError('');
+      renderAuthOverlay();
+      startQrLogin();
+    }
+
+    async function startQrLogin() {
+      authSetError('');
+      const data = await authPost('/api/auth/qr', { passphrase: authPassphrase() });
+      if (!data) return;
+      if (data.qr_png) {
+        const img = document.getElementById('auth-qr-image');
+        img.src = data.qr_png;
+        authToggle(img, true);
+        authToggle(document.getElementById('auth-qr-spinner'), false);
+      }
+      startQrPolling();
+    }
+
+    function startQrPolling() {
+      if (authFlow.qrTimer) clearInterval(authFlow.qrTimer);
+      authFlow.qrTimer = setInterval(pollQrStatus, 2000);
+    }
+
+    async function pollQrStatus() {
+      const overlay = document.getElementById('auth-overlay');
+      if (overlay.classList.contains('hidden')) {
+        clearInterval(authFlow.qrTimer);
+        authFlow.qrTimer = null;
+        return;
+      }
+      let data;
+      try {
+        const res = await fetch('/api/auth/qr/status');
+        if (res.status === 401) {
+          authFlow.needsToken = true;
+          renderAuthOverlay();
+          return;
+        }
+        if (!res.ok) return;
+        data = await res.json();
+      } catch (_) { return; }
+
+      if (data.qr_png) {
+        const img = document.getElementById('auth-qr-image');
+        img.src = data.qr_png;
+        authToggle(img, true);
+        authToggle(document.getElementById('auth-qr-spinner'), false);
+      }
+      if (data.status === 'password_required') {
+        clearInterval(authFlow.qrTimer);
+        authFlow.qrTimer = null;
+        authFlow.mode = 'phone';
+        authFlow.step = 'password';
+        authSetError('');
+        renderAuthOverlay();
+      }
+    }
+
+    async function requestPhoneCode() {
+      authSetError('');
+      const input = document.getElementById('auth-phone-input');
+      const data = await authPost('/api/auth/phone', {
+        phone: input ? input.value.trim() : '',
+        passphrase: authPassphrase()
+      });
+      if (!data) return;
+      authFlow.mode = 'phone';
+      authFlow.step = 'code';
+      renderAuthOverlay();
+    }
+
+    async function submitAuthCode() {
+      authSetError('');
+      const input = document.getElementById('auth-code-input');
+      const data = await authPost('/api/auth/code', { code: input ? input.value.trim() : '' });
+      if (!data) return;
+      if (data.error) { authSetError(data.error); return; }
+      if (data.status === 'password_required') {
+        authFlow.step = 'password';
+        renderAuthOverlay();
+        return;
+      }
+      authFlow.step = 'idle';
+      refreshStatus();
+    }
+
+    async function submitAuthPassword() {
+      authSetError('');
+      const input = document.getElementById('auth-password-input');
+      const data = await authPost('/api/auth/password', { password: input ? input.value : '' });
+      if (!data) return;
+      if (data.error) { authSetError(data.error); return; }
+      authFlow.step = 'idle';
+      refreshStatus();
+    }
+
+    async function unlockStoredSession() {
+      authSetError('');
+      const data = await authPost('/api/auth/unlock', { passphrase: authPassphrase() });
+      if (!data) return;
+      if (data.error) { authSetError(data.error); return; }
+      authFlow.step = 'idle';
+      refreshStatus();
+    }
+
+    async function submitAccessToken() {
+      authSetError('');
+      const input = document.getElementById('auth-token-input');
+      const res = await fetch('/api/auth/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: input ? input.value : '' })
+      });
+      if (!res.ok) {
+        authSetError('Token de acesso inválido.');
+        return;
+      }
+      authFlow.needsToken = false;
+      location.reload();
+    }
+
+    async function logoutTelegram() {
+      await authPost('/api/auth/logout', {});
+      authFlow.mode = 'qr';
+      authFlow.step = 'idle';
+      refreshStatus();
+    }
+
+    function renderAuthOverlay() {
+      const overlay = document.getElementById('auth-overlay');
+      if (!overlay) return;
+      const tg = appState.telegram || {};
+      const auth = tg.auth || {};
+      const authorized = !!tg.authorized;
+
+      if (authorized && !authFlow.needsToken) {
+        overlay.classList.add('hidden');
+        if (authFlow.qrTimer) { clearInterval(authFlow.qrTimer); authFlow.qrTimer = null; }
+        return;
+      }
+
+      overlay.classList.remove('hidden');
+
+      const locked = auth.status === 'locked';
+      const needsPassphrase = !!auth.needs_passphrase;
+
+      authToggle(document.getElementById('auth-token-panel'), authFlow.needsToken);
+      authToggle(document.getElementById('auth-login-panel'), !authFlow.needsToken && !locked);
+      authToggle(document.getElementById('auth-unlock-panel'), !authFlow.needsToken && locked);
+      authToggle(document.getElementById('auth-passphrase-panel'), !authFlow.needsToken && needsPassphrase);
+
+      document.getElementById('auth-overlay-subtitle').textContent = authFlow.needsToken
+        ? 'Informe o token de acesso configurado em TBMD_WEB_TOKEN.'
+        : (locked
+          ? 'Há uma sessão guardada no banco. Informe a senha de criptografia para usá-la.'
+          : 'Autentique sua conta para começar a baixar.');
+
+      const activeCls = 'flex-1 text-xs font-medium py-2 rounded-md transition-colors bg-telegram/15 text-telegram';
+      const idleCls = 'flex-1 text-xs font-medium py-2 rounded-md transition-colors text-slate-400 hover:text-slate-200';
+      document.getElementById('auth-tab-qr').className = authFlow.mode === 'qr' ? activeCls : idleCls;
+      document.getElementById('auth-tab-phone').className = authFlow.mode === 'phone' ? activeCls : idleCls;
+
+      authToggle(document.getElementById('auth-qr-panel'), authFlow.mode === 'qr');
+      authToggle(document.getElementById('auth-phone-panel'), authFlow.mode === 'phone');
+      authToggle(document.getElementById('auth-phone-step'), authFlow.mode === 'phone' && authFlow.step === 'idle');
+      authToggle(document.getElementById('auth-code-step'), authFlow.mode === 'phone' && authFlow.step === 'code');
+      authToggle(document.getElementById('auth-password-step'), authFlow.mode === 'phone' && authFlow.step === 'password');
+    }
+
+    async function refreshStatus() {
+      try {
+        const res = await fetch('/api/status');
+        if (res.status === 401) {
+          authFlow.needsToken = true;
+          renderAuthOverlay();
+          return;
+        }
+        if (res.ok) applySnapshot(await res.json());
+      } catch (_) {}
+    }
+
     // --- STATE SYNCHRONIZATION & WEBSOCKET ---
     function applySnapshot(snapshot) {
       if (!snapshot) return;
       appState = snapshot;
       updateHeaderAndAlerts();
+      renderAuthOverlay();
       renderJobsTable();
       if (activeDrawerJobId) renderTelemetryDrawer();
       if (activeLogsJobId) renderLogsModal();
@@ -2065,9 +2430,13 @@
         } catch (_) {}
       };
 
-      ws.onclose = () => {
+      ws.onclose = (event) => {
         dot.className = 'w-2 h-2 rounded-full bg-amber-400';
         label.textContent = 'WS: Reconectando';
+        if (event && event.code === 1008) {
+          authFlow.needsToken = true;
+          renderAuthOverlay();
+        }
         setTimeout(connectWebSocket, 2000);
       };
     }
@@ -2075,7 +2444,10 @@
     async function initialBoot() {
       try {
         const res = await fetch('/api/status');
-        if (res.ok) {
+        if (res.status === 401) {
+          authFlow.needsToken = true;
+          renderAuthOverlay();
+        } else if (res.ok) {
           const snap = await res.json();
           applySnapshot(snap);
           if (snap.environment && snap.environment.default_download_dir) {
@@ -2083,6 +2455,7 @@
           }
         }
       } catch (_) {}
+      renderAuthOverlay();
       connectWebSocket();
     }
 

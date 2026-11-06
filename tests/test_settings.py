@@ -18,8 +18,10 @@ class TestSettings(unittest.TestCase):
         self.assertEqual(settings.batch_size, 5)
         self.assertEqual(settings.download_dir, "downloads")
         self.assertEqual(settings.db_path, "tbmd.db")
-        self.assertEqual(settings.web_host, "0.0.0.0")
+        self.assertEqual(settings.web_host, "127.0.0.1")
         self.assertEqual(settings.web_port, 8000)
+        self.assertIsNone(settings.session_key)
+        self.assertIsNone(settings.web_token)
 
         # to_dict
         d = settings.to_dict()
@@ -46,8 +48,10 @@ class TestSettings(unittest.TestCase):
             "BATCH_SIZE": "15",
             "MESSAGE_LIMIT": "500",
             "DB_PATH": "/tmp/custom.db",
-            "WEB_HOST": "127.0.0.1",
+            "WEB_HOST": "0.0.0.0",
             "WEB_PORT": "9090",
+            "TBMD_SESSION_KEY": "segredo",
+            "TBMD_WEB_TOKEN": "token-do-painel",
         },
         clear=True,
     )
@@ -57,8 +61,10 @@ class TestSettings(unittest.TestCase):
         self.assertEqual(settings.batch_size, 15)
         self.assertEqual(settings.message_limit, 500)
         self.assertEqual(settings.db_path, "/tmp/custom.db")
-        self.assertEqual(settings.web_host, "127.0.0.1")
+        self.assertEqual(settings.web_host, "0.0.0.0")
         self.assertEqual(settings.web_port, 9090)
+        self.assertEqual(settings.session_key, "segredo")
+        self.assertEqual(settings.web_token, "token-do-painel")
 
 
 class TestWebStartupSettings(unittest.TestCase):
@@ -80,7 +86,7 @@ class TestWebStartupSettings(unittest.TestCase):
     @patch("uvicorn.run")
     def test_web_entrypoint_uses_standard_port(self, uvicorn_run, _load_env):
         web_main()
-        uvicorn_run.assert_called_once_with("src.web.app:app", host="0.0.0.0", port=8000, reload=False)
+        uvicorn_run.assert_called_once_with("src.web.app:app", host="127.0.0.1", port=8000, reload=False)
 
 
 if __name__ == "__main__":

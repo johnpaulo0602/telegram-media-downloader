@@ -12,8 +12,10 @@ class Settings:
     batch_size: int = 5
     message_limit: int | None = 2000
     db_path: str = "tbmd.db"
-    web_host: str = "0.0.0.0"
+    web_host: str = "127.0.0.1"
     web_port: int = 8000
+    session_key: str | None = None
+    web_token: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -26,6 +28,8 @@ class Settings:
             "db_path": self.db_path,
             "web_host": self.web_host,
             "web_port": self.web_port,
+            "session_key": self.session_key,
+            "web_token": self.web_token,
         }
 
 
@@ -47,8 +51,10 @@ def load_settings(env_file: str | None = None, load_env: bool = True) -> tuple[S
     batch_size_raw = os.getenv("BATCH_SIZE", "5")
     limit_raw = os.getenv("MESSAGE_LIMIT", "2000")
     db_path = os.getenv("DB_PATH", os.getenv("DB_FILE", "tbmd.db")).strip() or "tbmd.db"
-    web_host = os.getenv("WEB_HOST", "0.0.0.0").strip() or "0.0.0.0"
+    web_host = os.getenv("WEB_HOST", "127.0.0.1").strip() or "127.0.0.1"
     web_port_raw = os.getenv("WEB_PORT", "8000")
+    session_key = os.getenv("TBMD_SESSION_KEY", "").strip() or None
+    web_token = os.getenv("TBMD_WEB_TOKEN", "").strip() or None
 
     if not api_id_raw or not api_id_raw.strip():
         return None, "API_ID não definido no .env. Copie o .env.example para .env e configure suas credenciais da API do Telegram."
@@ -86,5 +92,7 @@ def load_settings(env_file: str | None = None, load_env: bool = True) -> tuple[S
         db_path=db_path,
         web_host=web_host,
         web_port=web_port,
+        session_key=session_key,
+        web_token=web_token,
     )
     return settings, None

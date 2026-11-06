@@ -121,3 +121,24 @@ class StartDownloadRequest(BaseModel):
 
 class QueuePauseRequest(BaseModel):
     paused: bool | None = None
+
+
+class PhoneRequest(BaseModel):
+    phone: str
+    passphrase: str | None = None
+
+
+class CodeRequest(BaseModel):
+    code: str
+
+
+class PasswordRequest(BaseModel):
+    password: str
+
+
+class UnlockRequest(BaseModel):
+    passphrase: str
+
+
+class AccessTokenRequest(BaseModel):
+    token: str

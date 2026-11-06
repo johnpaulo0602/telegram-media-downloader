@@ -12,7 +12,11 @@ services:
       - WEB_HOST=0.0.0.0
       - WEB_PORT=8000
     volumes:
-      # Sessão autenticada do Telethon (gere na 1ª vez com `python src/tbmd.py --list`)
+      # Sessão autenticada do Telethon + fila SQLite (geradas na 1ª vez pelo painel web)
+      - ./tbmd.db:/app/tbmd.db
+      - ./tbmd.db-wal:/app/tbmd.db-wal
+      - ./tbmd.db-shm:/app/tbmd.db-shm
+      # Sessão legada do Telethon (usada apenas para a migração inicial)
       - ./default_session.session:/app/default_session.session
       # Pasta padrão de downloads mapeada para o host/homelab
       - ./downloads:/downloads

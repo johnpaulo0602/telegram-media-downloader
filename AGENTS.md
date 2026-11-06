@@ -27,6 +27,7 @@ telegram-media-downloader/
 │   ├── models.py             # Enums, dataclasses (QueueItem, QueueStats) & Pydantic DTOs
 │   ├── utils.py              # Pure utilities: filenames, MIME, search, fs browser
 │   ├── queue_db.py           # SQLite persistent queue & history database manager
+│   ├── session_store.py      # Encrypted Telegram session storage (AES-256-GCM)
 │   ├── downloader.py         # Telegram engine, concurrent download workers & sessions
 │   ├── tbmd.py               # Thin CLI entrypoint (`python src/tbmd.py`)
 │   ├── cli/                  # Command-line interface package
@@ -37,8 +38,10 @@ telegram-media-downloader/
 │       ├── __init__.py       # Web package re-exports
 │       ├── app.py            # FastAPI application, lifespan & WebSocket router
 │       ├── manager.py        # WebDownloadManager (FIFO multi-job coordinator)
+│       ├── auth.py           # TelegramAuthService (QR / phone login, session storage)
 │       └── routes/           # Modular endpoint routers
 │           ├── __init__.py
+│           ├── auth.py       # /api/auth (login, unlock, logout, access token)
 │           ├── downloads.py  # /api/downloads, /api/jobs, /api/dialogs
 │           ├── filesystem.py # /api/fs (host/docker filesystem browser)
 │           └── queue.py      # /api/queue (SQLite queue stats, retry, items)
@@ -99,11 +102,19 @@ CLI user interface and entrypoint:
 ### `src/tbmd.py`
 The only entrypoint (`python src/tbmd.py`): makes the project root importable and delegates to `src.cli.main.run_cli()`. It intentionally re-exports nothing — import from the concrete modules (`src.utils`, `src.downloader`, `src.settings`, `src.queue_db`, `src.cli.main`) instead.
 
+### `src/session_store.py`
+Encrypted Telegram session storage:
+- **`SessionStore`**: Reads and writes the session in the `telegram_session` table, encrypted with AES-256-GCM (key derived via scrypt).
+- **`derive_key()` / `encrypt()` / `decrypt()`**: Pure crypto primitives; a wrong passphrase raises `SessionKeyError` through the GCM authentication tag.
+- **`resolve_passphrase()`**: Explicit value first, then `TBMD_SESSION_KEY` from the environment.
+- **`migrate_legacy_session()`**: Converts a legacy `*.session` file into a string session.
+
 ### `src/web/`
 FastAPI web application and homelab dashboard:
 - **`src/web/manager.py`**: `WebDownloadManager` coordinating FIFO jobs, background queue processor, and WebSocket live updates.
-- **`src/web/routes/`**: Cleanly divided routers for downloads, queue management, and filesystem browsing.
-- **`src/web/app.py`**: Application factory, lifespan, and static mounting.
+- **`src/web/auth.py`**: `TelegramAuthService` driving the QR and phone login flows and persisting the encrypted session.
+- **`src/web/routes/`**: Cleanly divided routers for authentication, downloads, queue management, and filesystem browsing.
+- **`src/web/app.py`**: Application factory, lifespan, static mounting and the `TBMD_WEB_TOKEN` access guard.
 
 ---
 
@@ -139,6 +150,7 @@ python3 -m unittest discover tests
    - `downloads/` directory (actual downloaded media)
 2. **Never hardcode credentials** into tests or source files.
 3. In unit tests involving `load_settings()`, call it with `load_env=False` and patch `os.environ` so tests do not inadvertently read local `.env` files.
+4. **Never persist the Telegram session in cleartext.** Use `src/session_store.py` so the `auth_key` is always encrypted at rest. The 2FA password and the encryption passphrase are transient and must never be written to disk or logs.
 
 ---
 
@@ -149,3 +161,16 @@ python3 -m unittest discover tests
 - **Async Safety**: Telethon uses `asyncio`. Avoid blocking synchronous I/O within async loops where possible.
 - **Rich Output**: User messages, errors, warnings, and tables should maintain Rich styling consistency.
 - **Unit Tests**: Whenever modifying `safe_filename`, entity resolution, or state management, add or update corresponding unit tests in `tests/test_tbmd.py`.
+
+---
+
+## 7. Git Workflow
+
+**Commit locally only. Never push.**
+
+- Create the commit with `git commit` and stop there. Do not run `git push`, and do not
+  configure credentials, remotes, or branch upstream to make a push possible.
+- The maintainer reviews the commit and pushes manually when ready.
+- Never amend or rewrite existing commits; create a new one instead.
+- Before committing, run the test suite and review `git status` to confirm no
+  credentials, session files, or databases are staged.

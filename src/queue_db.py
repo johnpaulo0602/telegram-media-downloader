@@ -67,6 +67,17 @@ class QueueDatabase:
                 CREATE INDEX IF NOT EXISTS idx_queue_chat_status ON queue_items (chat_id, status);
                 CREATE INDEX IF NOT EXISTS idx_queue_status ON queue_items (status);
                 CREATE INDEX IF NOT EXISTS idx_queue_chat_msg ON queue_items (chat_id, message_id);
+
+                CREATE TABLE IF NOT EXISTS telegram_session (
+                    id INTEGER PRIMARY KEY CHECK(id = 1),
+                    ciphertext BLOB NOT NULL,
+                    salt BLOB NOT NULL,
+                    nonce BLOB NOT NULL,
+                    phone TEXT,
+                    user_id INTEGER,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                );
                 """
             )
 
@@ -526,3 +537,43 @@ class QueueDatabase:
                     "size": row["file_size"],
                 }
         return result
+
+    def get_session_row(self) -> dict[str, Any] | None:
+        """Return the encrypted Telegram session row, or None if no session is stored."""
+        with self.get_connection() as conn:
+            row = conn.execute("SELECT * FROM telegram_session WHERE id = 1").fetchone()
+            return dict(row) if row else None
+
+    def upsert_session_row(
+        self,
+        ciphertext: bytes,
+        salt: bytes,
+        nonce: bytes,
+        phone: str | None = None,
+        user_id: int | None = None,
+    ) -> None:
+        """Insert or replace the single encrypted Telegram session row."""
+        now = time.time()
+        with self.get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO telegram_session (
+                    id, ciphertext, salt, nonce, phone, user_id, created_at, updated_at
+                )
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    ciphertext = excluded.ciphertext,
+                    salt = excluded.salt,
+                    nonce = excluded.nonce,
+                    phone = excluded.phone,
+                    user_id = excluded.user_id,
+                    updated_at = excluded.updated_at
+                """,
+                (ciphertext, salt, nonce, phone, user_id, now, now),
+            )
+
+    def delete_session_row(self) -> bool:
+        """Delete the stored Telegram session. Returns True if a row was removed."""
+        with self.get_connection() as conn:
+            cursor = conn.execute("DELETE FROM telegram_session WHERE id = 1")
+            return cursor.rowcount > 0
