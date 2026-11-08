@@ -748,13 +748,18 @@
 
           <!-- Editable Path Input -->
           <div class="flex gap-2">
-            <input id="wiz-dest-dir" type="text" placeholder="/caminho/de/destino" class="flex-1 bg-bgBase border border-borderHighlight focus:border-telegram rounded-lg px-3.5 py-2 text-xs font-mono text-white focus:outline-none" />
+            <input id="wiz-dest-dir" oninput="updateDestinationPreview()" type="text" placeholder="/caminho/de/destino" class="flex-1 bg-bgBase border border-borderHighlight focus:border-telegram rounded-lg px-3.5 py-2 text-xs font-mono text-white focus:outline-none" />
             <button type="button" onclick="browseToInputPath()" class="px-3.5 py-2 rounded-lg bg-bgElevated hover:bg-slate-700 text-xs font-medium text-slate-200 border border-borderHighlight transition-colors">
               Ir
             </button>
             <button type="button" onclick="toggleNewFolderBox()" class="px-3.5 py-2 rounded-lg bg-telegram/15 hover:bg-telegram/25 text-xs font-medium text-telegram border border-telegram/30 transition-colors">
               + Nova Pasta
             </button>
+          </div>
+
+          <div class="bg-bgBase border border-telegram/30 rounded-lg px-3.5 py-3 space-y-1" aria-live="polite">
+            <span class="text-[10px] font-mono uppercase text-slate-400">Caminho final dos downloads</span>
+            <code id="wiz-final-dest" class="block text-xs text-telegram whitespace-normal break-all">--</code>
           </div>
 
           <!-- Inline New Folder Creation -->
@@ -805,7 +810,7 @@
               </div>
               <div class="bg-bgSurface p-3 rounded-lg border border-borderSubtle">
                 <span class="text-[10px] font-mono uppercase text-slate-400 block">Destino no Servidor</span>
-                <span id="sum-dest" class="text-xs font-mono text-slate-200 mt-0.5 block truncate">--</span>
+                <span id="sum-dest" class="text-xs font-mono text-slate-200 mt-0.5 block break-all">--</span>
               </div>
             </div>
           </div>
@@ -1753,6 +1758,7 @@
       }
 
       currentWizardStep = step;
+      updateDestinationPreview();
       for (let i = 1; i <= 4; i++) {
         const panel = document.getElementById(`wiz-step-${i}`);
         const tab = document.getElementById(`wiz-tab-${i}`);
@@ -1814,6 +1820,7 @@
     function selectWizardChat(inputVal, titleVal, rerender = true) {
       selectedChatInput = inputVal;
       selectedChatTitle = titleVal || inputVal;
+      updateDestinationPreview();
       const banner = document.getElementById('wiz-selected-banner');
       banner.classList.remove('hidden');
       document.getElementById('wiz-selected-label').textContent = selectedChatTitle;
@@ -1908,6 +1915,7 @@
       currentFsState = data;
 
       document.getElementById('wiz-dest-dir').value = data.requested_path || data.current_path;
+      updateDestinationPreview();
 
       // Update header disk telemetry too
       if (data.disk_total_bytes > 0) {
@@ -2015,20 +2023,29 @@
       return slug;
     }
 
+    function updateDestinationPreview() {
+      const base = (document.getElementById('wiz-dest-dir').value || '').trim()
+        || appState.environment.default_download_dir || '/downloads';
+      const path = `${base.replace(/\/+$/, '')}/${channelFolderPreview(selectedChatTitle, selectedChatInput)}`;
+      for (const id of ['wiz-final-dest', 'sum-dest']) {
+        const element = document.getElementById(id);
+        element.textContent = path;
+        element.title = path;
+      }
+    }
+
     function populateWizardSummary() {
       const mediaTypes = getSelectedWizardMediaTypes();
       const labels = mediaTypes.map(k => (MEDIA_BADGE_STYLES[k] ? MEDIA_BADGE_STYLES[k].label : k));
       const unlim = document.getElementById('wiz-unlimited-cb').checked;
       const limitVal = unlim ? null : (parseInt(document.getElementById('wiz-message-limit').value, 10) || 2000);
       const batchVal = parseInt(document.getElementById('wiz-batch-size').value, 10) || 5;
-      const destVal = document.getElementById('wiz-dest-dir').value || appState.environment.default_download_dir;
 
       document.getElementById('sum-chat').textContent = `${selectedChatTitle} (${selectedChatInput})`;
       document.getElementById('sum-media').textContent = labels.join(' + ');
       document.getElementById('sum-workers').textContent =
         `${batchVal} workers • Limite: ${limitVal ? limitVal + ' msgs' : 'Sem limite'}`;
-      document.getElementById('sum-dest').textContent =
-        `${destVal.replace(/\/$/, '')}/${channelFolderPreview(selectedChatTitle, selectedChatInput)}`;
+      updateDestinationPreview();
 
       const q = appState.queue || {};
       const noticeBox = document.getElementById('wiz-queue-notice');
@@ -2081,7 +2098,10 @@
         if (!res.ok) {
           resBox.innerHTML = `<div class="text-rose-400">${escapeHtml(data.detail || 'Falha ao escanear canal.')}</div>`;
         } else {
-          document.getElementById('sum-dest').textContent = data.dest_dir;
+          for (const id of ['wiz-final-dest', 'sum-dest']) {
+            document.getElementById(id).textContent = data.dest_dir;
+            document.getElementById(id).title = data.dest_dir;
+          }
           resBox.innerHTML = `
             <div class="grid grid-cols-3 gap-2 font-mono text-center">
               <div class="bg-bgSurface p-2 rounded border border-borderSubtle">
