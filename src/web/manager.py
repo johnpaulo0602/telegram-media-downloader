@@ -48,7 +48,7 @@ class WebDownloadManager:
         self.authorized: bool = False
         self.user_info: dict | None = None
         self.db: QueueDatabase | None = None
-        self.auth = TelegramAuthService(lambda: self.config, lambda: self.db)
+        self.auth = TelegramAuthService(lambda: self.config, lambda: self.db, self.adopt_auth_client)
         self.dialogs_cache: list = []
         self.dialogs_updated_at: float = 0.0
 
@@ -177,6 +177,18 @@ class WebDownloadManager:
         if self.authorized:
             self._ensure_queue_processor()
 
+    async def adopt_auth_client(self):
+        """Publish successful phone/QR authentication to jobs and WebSocket clients."""
+        self.client = self.auth.client
+        self.connected = self.client is not None
+        self.authorized = self.auth.authorized
+        self.user_info = self.auth.user_info
+        self.dialogs_cache = []
+        self.dialogs_updated_at = 0.0
+        if self.authorized:
+            self._ensure_queue_processor()
+        await self.broadcast_state(force=True)
+
     def get_db(self) -> QueueDatabase:
         """Return the shared queue database instance."""
         if self.db is None:
@@ -184,6 +196,7 @@ class WebDownloadManager:
         return self.db
 
     async def shutdown(self):
+        await self.auth._reset_auth_client()
         if self.active_Session:
             self.active_Session.cancelled = True
         if self.active_task and not self.active_task.done():

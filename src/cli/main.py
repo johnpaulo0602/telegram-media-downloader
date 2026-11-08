@@ -14,6 +14,7 @@ from questionary import Choice
 from rich.markup import escape
 from rich.panel import Panel
 from telethon import TelegramClient, utils
+from telethon.sessions import StringSession
 
 from src.cli.ui import (
     choose_chat,
@@ -101,13 +102,12 @@ async def main():
         return
 
     if client is None:
-        client = TelegramClient(config["session_name"], config["api_id"], config["api_hash"])
+        client = TelegramClient(StringSession(), config["api_id"], config["api_hash"])
 
     async with client:
         if not await client.is_user_authorized():
             await client.start()
-            save_client_session(client, db, config["session_key"])
-            console.print("[green]✓[/] Sessão autenticada e guardada no banco SQLite (criptografada).")
+        save_client_session(client, db, config["session_key"])
 
         if args.list or args.search:
             dialogs = await fetch_dialogs(client)

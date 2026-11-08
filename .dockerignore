@@ -10,3 +10,9 @@ downloads/
 download_state.json
 jobs_history.json
 .DS_Store
+
+.env.*
+*.db
+*.db-*
+*.session-*
+data/

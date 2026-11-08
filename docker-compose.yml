@@ -16,8 +16,6 @@ services:
       # Sessão autenticada do Telegram + fila SQLite (volume nomeado, evita
       # conflito de permissões do WAL com o bind mount do host)
       - tbmd-data:/app/data
-      # Sessão legada do Telethon (usada apenas para a migração inicial)
-      - ./default_session.session:/app/default_session.session
       # Pasta padrão de downloads mapeada para o host/homelab
       - ./downloads:/downloads
       # Exemplos de volumes extras do Homelab / NAS que aparecerão automaticamente na Web UI:

@@ -174,3 +174,5 @@ python3 -m unittest discover tests
 - Never amend or rewrite existing commits; create a new one instead.
 - Before committing, run the test suite and review `git status` to confirm no
   credentials, session files, or databases are staged.
+
+Authentication lifecycle: `TelegramAuthService._finalize()` notifies the manager through `on_authorized`; keep manager, queue and WebSocket authentication state synchronized. CLI clients use `StringSession`, save after context entry (Telethon auto-authenticates there), and import legacy SQLite sessions only when no encrypted session exists. Docker legacy import is opt-in via `docker-compose.migrate.yml`.

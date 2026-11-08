@@ -124,15 +124,20 @@ def migrate_legacy_session(session_path: str) -> str | None:
     Read a legacy ``*.session`` file and return its string representation.
     Returns None when the file is missing or holds no authentication key.
     """
-    if not os.path.exists(session_path):
+    session_path = os.fspath(session_path)
+    if not session_path.endswith(".session"):
+        session_path += ".session"
+    if not os.path.isfile(session_path):
         return None
+    legacy = None
     try:
         legacy = SQLiteSession(session_path)
         if not legacy.auth_key:
             return None
         return session_to_string(legacy)
-    except Exception:
-        return None
+    finally:
+        if legacy is not None:
+            legacy.close()
 
 
 def open_client_from_store(config: dict[str, Any], db: QueueDatabase) -> TelegramClient | None:
@@ -143,7 +148,11 @@ def open_client_from_store(config: dict[str, Any], db: QueueDatabase) -> Telegra
     """
     store = SessionStore(db)
     if not store.has_session():
-        return None
+        legacy = migrate_legacy_session(config.get("session_name", "default_session"))
+        if legacy:
+            store.save(legacy, config["session_key"])
+        else:
+            return None
 
     session_string = store.load(config["session_key"])
     return TelegramClient(StringSession(session_string), config["api_id"], config["api_hash"])

@@ -10,6 +10,7 @@ from src.session_store import (
     derive_key,
     encrypt,
     migrate_legacy_session,
+    session_to_string,
 )
 
 
@@ -110,3 +111,21 @@ class TestLegacyMigration(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class TestLegacyImport(unittest.TestCase):
+    def test_extensionless_path_imports_into_encrypted_store(self):
+        from telethon.sessions import SQLiteSession
+        from telethon.crypto import AuthKey
+        from src.session_store import open_client_from_store
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, 'legacy')
+            legacy = SQLiteSession(path)
+            legacy.set_dc(2, '149.154.167.51', 443)
+            legacy.auth_key = AuthKey(bytes(range(256)))
+            expected = session_to_string(legacy)
+            legacy.close()
+            db = QueueDatabase(os.path.join(tmp, 'test.db'))
+            client = open_client_from_store({'session_name': path, 'session_key': 'test-key',
+                                             'api_id': 12345, 'api_hash': 'dummy_hash'}, db)
+            self.assertIsNotNone(client)
+            self.assertEqual(SessionStore(db).load('test-key'), expected)

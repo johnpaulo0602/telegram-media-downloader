@@ -40,3 +40,5 @@ python -m unittest discover tests
 - Ensure all filenames and paths are sanitized across Windows, macOS, and Linux.
 - Add or update unit tests in `tests/test_tbmd.py` when fixing bugs or introducing new features.
 - Never commit `.env` or session files (`*.session`, `*.session-journal`) to version control.
+
+Authentication changes must cover successful login adoption by the web manager, pending QR/2FA state, encrypted CLI persistence, and legacy migration. Never log session strings or passwords. Test with temporary databases and mocked Telegram clients.

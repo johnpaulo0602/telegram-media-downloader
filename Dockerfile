@@ -15,12 +15,13 @@ RUN pip install --no-cache-dir --upgrade pip && \
 COPY src/ ./src/
 
 # Create standard mount points for homelab volumes
-RUN mkdir -p /downloads /media /mnt
+RUN mkdir -p /downloads /media /mnt /app/data
 
 ENV PYTHONUNBUFFERED=1
 ENV WEB_HOST=0.0.0.0
 ENV WEB_PORT=8000
 ENV DOWNLOAD_DIR=/downloads
+ENV DB_PATH=/app/data/tbmd.db
 
 EXPOSE 8000
 

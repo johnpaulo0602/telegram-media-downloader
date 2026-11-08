@@ -14,7 +14,7 @@ import base64
 import io
 import os
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Awaitable
 
 import segno
 from telethon import TelegramClient, utils
@@ -64,7 +64,9 @@ class TelegramAuthService:
         self,
         config_provider: Callable[[], dict[str, Any] | None],
         db_provider: Callable[[], Any],
+        on_authorized: Callable[[], Awaitable[None]] | None = None,
     ):
+        self._on_authorized = on_authorized
         self._config_provider = config_provider
         self._db_provider = db_provider
         self.store: SessionStore | None = None
@@ -158,6 +160,10 @@ class TelegramAuthService:
     async def _reset_auth_client(self) -> None:
         if self._qr_task and not self._qr_task.done():
             self._qr_task.cancel()
+            try:
+                await self._qr_task
+            except asyncio.CancelledError:
+                pass
         self._qr_task = None
         self._qr = None
         if self._auth_client is not None:
@@ -244,7 +250,9 @@ class TelegramAuthService:
         return {"status": AUTH_AUTHORIZED}
 
     async def start_qr(self) -> dict[str, Any]:
-        """Start a QR login and return the image to display."""
+        """Start a QR login without replacing an authorized or pending 2FA client."""
+        if self.status in (AUTH_AUTHORIZED, AUTH_PASSWORD_REQUIRED):
+            return self.state()
         await self._reset_auth_client()
 
         client = await self._new_auth_client()
@@ -283,11 +291,15 @@ class TelegramAuthService:
             return
 
         if self._auth_client is not None:
-            await self._finalize(self._auth_client)
+            try:
+                await self._finalize(self._auth_client)
+            except Exception:
+                self.status = AUTH_UNAUTHENTICATED
+                self.error = "Não foi possível persistir a sessão. Verifique o banco e tente novamente."
 
     async def qr_status(self) -> dict[str, Any]:
         """Report the QR login progress, regenerating the code when it expires."""
-        if self.status in (AUTH_AUTHORIZED, AUTH_PASSWORD_REQUIRED, AUTH_UNAUTHENTICATED):
+        if self.status not in (AUTH_QR_READY, AUTH_QR_EXPIRED):
             return {"status": self.status, "error": self.error}
 
         expired = self._qr is None or self._qr.expires.timestamp() <= time.time()
@@ -343,6 +355,10 @@ class TelegramAuthService:
         self._auth_client = None
         self._qr = None
         self.qr_png = None
+        self.qr_expires_at = None
+        self._phone = self._phone_code_hash = None
+        if self._on_authorized:
+            await self._on_authorized()
 
     def state(self) -> dict[str, Any]:
         """Serializable authentication state for the frontend."""

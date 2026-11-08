@@ -2190,6 +2190,7 @@
     }
 
     function switchAuthMode(mode) {
+      if (authFlow.qrTimer) { clearInterval(authFlow.qrTimer); authFlow.qrTimer = null; }
       authFlow.mode = mode;
       authFlow.step = 'idle';
       authSetError('');
@@ -2247,6 +2248,12 @@
         img.src = data.qr_png;
         authToggle(img, true);
         authToggle(document.getElementById('auth-qr-spinner'), false);
+      }
+      if (data.status === 'authorized') {
+        clearInterval(authFlow.qrTimer);
+        authFlow.qrTimer = null;
+        await refreshStatus();
+        return;
       }
       if (data.status === 'password_required') {
         clearInterval(authFlow.qrTimer);
@@ -2324,6 +2331,13 @@
       const tg = appState.telegram || {};
       const auth = tg.auth || {};
       const authorized = !!tg.authorized;
+      if (auth.status === 'password_required') {
+        authFlow.mode = 'phone';
+        authFlow.step = 'password';
+      } else if (auth.status === 'code_sent') {
+        authFlow.mode = 'phone';
+        authFlow.step = 'code';
+      }
 
       if (authorized && !authFlow.needsToken) {
         overlay.classList.add('hidden');

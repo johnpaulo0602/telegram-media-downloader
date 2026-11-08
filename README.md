@@ -244,7 +244,7 @@ O Telethon pede o número de telefone, o código de login e, se necessário, a s
 |---|---|---|
 | `API_ID` | *Obrigatório* | ID numérico da API do Telegram (my.telegram.org) |
 | `API_HASH` | *Obrigatório* | Hash da API do Telegram |
-| `SESSION_NAME` | `default_session` | Nome do arquivo de sessão do Telethon |
+| `SESSION_NAME` | `default_session` | Nome/caminho da sessão legada, usado somente para migração |
 | `DOWNLOAD_DIR` | `downloads` | Pasta base; os arquivos vão para `<DOWNLOAD_DIR>/<tipo>` |
 | `BATCH_SIZE` | `5` | Máximo de downloads simultâneos (recomendado: 3 a 10) |
 | `MESSAGE_LIMIT` | `2000` | Máximo de mensagens inspecionadas (`0` = ilimitado) |
@@ -278,7 +278,15 @@ O Telethon grava a `auth_key` de 256 bytes em claro tanto no arquivo `.session` 
 
 ### Sessão legada
 
-Um `default_session.session` existente é migrado automaticamente para o banco no primeiro start. Após a migração, o arquivo legado pode ser removido manualmente do host e o bind mount correspondente no `docker-compose.yml` pode ser retirado.
+Um `default_session.session` existente já é SQLite do Telethon, mas contém a chave de autenticação em claro. CLI e web importam esse arquivo para a tabela criptografada `telegram_session` quando o banco ainda não contém sessão. Novos logins da CLI usam sessão em memória e persistem somente no banco criptografado.
+
+No Docker, para importar o arquivo legado do host, use uma vez:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.migrate.yml up -d --build
+```
+
+Confirme que o painel está autenticado e reinicie com `docker compose up -d` para retirar o mount legado. O original é preservado; remova-o manualmente após confirmar a migração. Se já houver sessão no banco, ela tem prioridade. Não apague o banco para forçar migração: ele também contém a fila.
 
 ### Protegendo o painel
 
@@ -357,12 +365,14 @@ Acesse `http://localhost:8000` (ou o IP do servidor no homelab). A interface ofe
 
 ### Docker Compose
 
-1. Autentique a sessão uma vez via terminal (`python src/tbmd.py --list`) para gerar `default_session.session`.
+1. Configure `.env`, incluindo `TBMD_SESSION_KEY` e, para proteger o painel, `TBMD_WEB_TOKEN`. Faça login diretamente no painel por QR ou telefone; não é necessário gerar arquivo `.session`.
 2. Suba o container:
 
    ```bash
    docker compose up -d --build
    ```
+
+O volume nomeado `tbmd-data` preserva `/app/data/tbmd.db` e seus arquivos WAL entre recriações. Não execute `docker compose down -v` se quiser preservar sessão e fila. A CLI local usa outro banco por padrão; para compartilhar o banco do container, execute `docker compose exec tbmd-web python src/tbmd.py --list`. Mantenha o mesmo `TBMD_SESSION_KEY` entre reinícios.
 
 Os volumes mapeados no `docker-compose.yml` (`/downloads`, `/media`, `/mnt`) aparecem automaticamente nos atalhos do seletor de pastas.
 

@@ -221,3 +221,91 @@ class TestAccessTokenGuard(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class TestCompletedLogin(unittest.IsolatedAsyncioTestCase):
+    async def test_password_completion_adopts_client_and_persists_session(self):
+        from src.web.manager import WebDownloadManager
+        from src.session_store import SessionStore
+        from telethon.sessions import MemorySession
+        from telethon.crypto import AuthKey
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = WebDownloadManager()
+            manager.db = QueueDatabase(os.path.join(tmp, 'test.db'))
+            manager.config = {'session_key': 'test-key'}
+            manager._ensure_queue_processor = MagicMock()
+            manager.broadcast_state = AsyncMock()
+            auth = manager.auth
+            auth.store = SessionStore(manager.db)
+            auth.passphrase = 'test-key'
+            client = MagicMock()
+            client.session = MemorySession()
+            client.session.set_dc(2, '149.154.167.51', 443)
+            client.session.auth_key = AuthKey(bytes(range(256)))
+            client.sign_in = AsyncMock()
+            client.get_me = AsyncMock(return_value=MagicMock(id=42, first_name='Test', last_name='', username=None, phone=None))
+            auth._auth_client = client
+            auth.status = 'password_required'
+            result = await auth.submit_password('transient')
+            self.assertEqual(result['status'], 'authorized')
+            self.assertTrue(manager.authorized)
+            self.assertIs(manager.client, client)
+            self.assertTrue(auth.store.has_session())
+            manager.broadcast_state.assert_awaited_once()
+            self.assertIsNone(auth._auth_client)
+            self.assertNotIn('transient', str(auth.state()))
+            # Late QR polling/start must never reset a completed login.
+            await auth.start_qr()
+            self.assertTrue(manager.authorized)
+
+    async def test_qr_poll_does_not_replace_phone_flow(self):
+        auth = TelegramAuthService(lambda: {}, lambda: None)
+        auth.status = 'code_sent'
+        auth.start_qr = AsyncMock()
+        self.assertEqual((await auth.qr_status())['status'], 'code_sent')
+        auth.start_qr.assert_not_awaited()
+
+    async def test_qr_two_factor_keeps_pending_client(self):
+        from telethon.errors import SessionPasswordNeededError
+        auth = TelegramAuthService(lambda: {}, lambda: None)
+        client = MagicMock()
+        auth._auth_client = client
+        qr = MagicMock()
+        qr.wait = AsyncMock(side_effect=SessionPasswordNeededError(None))
+        await auth._await_qr(qr)
+        self.assertEqual(auth.status, 'password_required')
+        await auth.start_qr()
+        self.assertIs(auth._auth_client, client)
+
+class TestCLIPersistence(unittest.IsolatedAsyncioTestCase):
+    async def test_cli_saves_session_after_automatic_context_login(self):
+        import importlib
+        from types import SimpleNamespace
+        cli = importlib.import_module('src.cli.main')
+        args = SimpleNamespace(queue_stats=False, retry_failed=False, list=True, search=None)
+        client = MagicMock()
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=False)
+        client.is_user_authorized = AsyncMock(return_value=True)
+        settings = MagicMock()
+        settings.to_dict.return_value = {'session_key': 'test-key'}
+        with patch.object(cli, 'build_parser') as parser, \
+             patch.object(cli, 'load_settings', return_value=(settings, None)), \
+             patch.object(cli, 'get_queue_db'), patch.object(cli, 'load_state'), \
+             patch.object(cli, 'open_client_from_store', return_value=client), \
+             patch.object(cli, 'save_client_session') as save, \
+             patch.object(cli, 'fetch_dialogs', new=AsyncMock(return_value=[])):
+            parser.return_value.parse_args.return_value = args
+            await cli.main()
+            save.assert_called_once()
+            self.assertIs(save.call_args.args[0], client)
+
+class TestQRCompletion(unittest.IsolatedAsyncioTestCase):
+    async def test_qr_without_two_factor_finalizes_in_background(self):
+        service = TelegramAuthService(lambda: {}, lambda: None)
+        client = MagicMock()
+        service._auth_client = client
+        service._finalize = AsyncMock()
+        qr = MagicMock()
+        qr.wait = AsyncMock()
+        await service._await_qr(qr)
+        service._finalize.assert_awaited_once_with(client)
