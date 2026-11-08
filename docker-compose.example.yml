@@ -13,7 +13,7 @@ services:
       - WEB_HOST=0.0.0.0
       - WEB_PORT=8000
     volumes:
-      # Sessão autenticada do Telegram + fila SQLite (volume nomeado, evita
+      # Sessão criptografada, mídias, jobs e estado da fila no SQLite (evita
       # conflito de permissões do WAL com o bind mount do host)
       - tbmd-data:/app/data
       # Pasta padrão de downloads mapeada para o host/homelab

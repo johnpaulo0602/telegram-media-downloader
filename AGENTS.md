@@ -86,7 +86,7 @@ Stateless utility functions:
 
 ### `src/queue_db.py`
 Manages the persistent SQLite database (`tbmd.db`) in WAL mode:
-- **`QueueDatabase`**: Schema creation, bulk item pre-enqueueing (`enqueue_batch`), status transitions, attempt tracking with retries (`max_attempts`), manual batch retries (`retry_failed`), and legacy JSON migration (`import_from_json`).
+- **`QueueDatabase`**: Schema creation, bulk item pre-enqueueing (`enqueue_batch`), status transitions, attempt tracking with retries (`max_attempts`), manual batch retries (`retry_failed`), and legacy media JSON migration (`import_from_json`). `web_jobs` and `web_queue_state` persist the complete web queue through `load_web_queue()` / `save_web_queue()`; `import_web_queue_from_json()` is an atomic, one-time legacy import.
 
 ### `src/downloader.py`
 The core Telegram downloader:
@@ -182,4 +182,7 @@ Authentication lifecycle: `TelegramAuthService._finalize()` notifies the manager
 
 - Track only `docker-compose.example.yml` as the deployment template. Copy it to `docker-compose.yml` for local use; the latter must remain ignored and must never be staged. Document template changes in README.md.
 - Legacy `*.session` files are only migration inputs. After confirming the encrypted database session is authorized and survives container recreation without a legacy mount, remove the obsolete local session. Never commit authentication files.
-- `jobs_history.json` is still used by `WebDownloadManager` for web jobs, the job counter and queue pause state. Keep it local and ignored; do not remove it as redundant with SQLite. Its current `/app/jobs_history.json` location is outside the named database volume and needs a separate mount to persist across container recreation.
+- SQLite at `DB_PATH` is the only runtime persistence for web jobs, FIFO order, history, the job counter and queue pause state. Save jobs and queue metadata in one transaction. Never truncate pending jobs to enforce a history limit.
+- `jobs_history.json` is only a legacy migration input (next to the database first, then project root), never an output. Import only if `web_queue_state` is absent; an existing empty queue is authoritative and must not resurrect deleted jobs. Reject malformed imports without changing database state or deleting the source.
+- Before upgrading an old Docker container, preserve its legacy JSON in the database volume before container recreation. Validate SQLite restoration before deleting the legacy JSON. Do not merge separate host/container queues implicitly.
+- On startup, keep queued jobs pending and mark interrupted scanning/downloading/cancelling jobs cancelled for explicit retry. Persist state changes and final metrics on shutdown; await cancelled workers before the final save. Test migration, rollback, restart, pause, FIFO changes, retries and clearing history with temporary databases.

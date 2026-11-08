@@ -378,7 +378,22 @@ Acesse `http://localhost:8000` (ou o IP do servidor no homelab). A interface ofe
 
 O volume nomeado `tbmd-data` preserva `/app/data/tbmd.db` e seus arquivos WAL entre recriações. Não execute `docker compose down -v` se quiser preservar sessão e fila. A CLI local usa outro banco por padrão; para compartilhar o banco do container, execute `docker compose exec tbmd-web python src/tbmd.py --list`. Mantenha o mesmo `TBMD_SESSION_KEY` entre reinícios.
 
-O arquivo `jobs_history.json` continua necessário para o histórico de jobs do painel, contador e pausa da fila; ele é local e ignorado pelo Git. Ele é separado do SQLite que registra os itens de mídia e a sessão criptografada. Atualmente fica na raiz da aplicação (`/app/jobs_history.json` no container), fora do volume `tbmd-data`; sem um mount adicional, esse histórico web não sobrevive à recriação do container.
+O SQLite em `DB_PATH` é a única persistência dos jobs e do estado da fila: `web_jobs` guarda os lotes, sua ordem e histórico; `web_queue_state` guarda o contador de IDs e o estado de pausa. Essas tabelas compartilham o banco com `queue_items` (mídias) e `telegram_session` (sessão criptografada). Tudo fica no volume `tbmd-data`, inclusive após recriar o container. Jobs e metadados são gravados na mesma transação, sem o antigo limite de 100 jobs que poderia descartar itens pendentes.
+
+#### Migração do histórico web antigo
+
+`jobs_history.json` é apenas uma entrada de migração, nunca mais um arquivo de saída. No primeiro início, a aplicação procura esse arquivo ao lado do banco e depois na raiz do projeto. A primeira origem encontrada é importada; depois disso, o SQLite tem prioridade mesmo se todos os jobs forem apagados. Um JSON inválido impede o início para evitar perda silenciosa; preserve e corrija o arquivo antes de tentar novamente.
+
+Em uma instalação local, inicie normalmente com o JSON antigo presente e o `DB_PATH` correto. No Docker, o JSON da versão anterior pode estar apenas na camada efêmera do container. **Antes de recriá-lo**, aguarde o download ativo terminar e copie o histórico para o volume persistente:
+
+```bash
+docker compose exec tbmd-web python -c 'import shutil; shutil.copy2("/app/jobs_history.json", "/app/data/jobs_history.json")'
+docker compose up -d --build
+```
+
+Se você alterou o diretório de `DB_PATH`, ajuste o caminho de destino da cópia. Confira os jobs, sua ordem e a pausa no painel e recrie o container mais uma vez para confirmar a restauração. Após validar, remova o JSON legado do host e do volume; ele não é mais necessário. Não copie o histórico do host sobre o do container se forem instalações diferentes: cada arquivo deve ser importado no banco correspondente.
+
+Jobs que estavam aguardando permanecem na fila e voltam a executar quando houver sessão autenticada e a fila não estiver pausada. Jobs interrompidos durante a execução ficam como cancelados após reiniciar e podem ser reenfileirados explicitamente pelo painel. A sessão criptografada e os registros das mídias não são substituídos pela migração.
 
 No passo 3, o único atalho recomendado é `DOWNLOAD_DIR` (`/downloads` no container), apontando para o volume persistente. Você pode navegar e escolher outra pasta base.
 

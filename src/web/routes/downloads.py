@@ -76,7 +76,7 @@ async def api_clear_job_logs(job_id: str):
     job["recent_logs"] = []
     if job_id == manager.current_job_id:
         manager.recent_logs.clear()
-    manager.save_jobs_history()
+    manager.persist_queue_state()
     await manager.broadcast_state(force=True)
     return manager.get_snapshot()
 
@@ -94,5 +94,6 @@ async def api_clear_logs():
         job = manager._get_job(manager.current_job_id)
         if job:
             job["recent_logs"] = []
+    manager.persist_queue_state()
     await manager.broadcast_state(force=True)
     return manager.get_snapshot()

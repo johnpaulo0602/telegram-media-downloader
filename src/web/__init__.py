@@ -23,7 +23,7 @@ from src.utils import (
     normalize_media_types,
 )
 from src.web.app import STATIC_DIR, app, main
-from src.web.manager import JOBS_FILE, WebDownloadManager, manager
+from src.web.manager import WebDownloadManager, manager
 
 __all__ = [
     "app",
@@ -33,7 +33,6 @@ __all__ = [
     "get_filesystem_shortcuts",
     "is_running_in_docker",
     "normalize_media_types",
-    "JOBS_FILE",
     "STATIC_DIR",
     "MkdirRequest",
     "PreviewRequest",

@@ -95,6 +95,13 @@ class TestDownloadSessionEvents(unittest.TestCase):
 
 class TestWebEndpoints(unittest.TestCase):
     def setUp(self):
+        self.original_state = dict(web.manager.__dict__)
+        self.tmp = tempfile.TemporaryDirectory()
+        web.manager.db = QueueDatabase(os.path.join(self.tmp.name, "web.db"))
+        web.manager.jobs = []
+        web.manager.current_job_id = None
+        web.manager.queue_paused = False
+
         self.init_patcher = patch.object(web.manager, "initialize", new_callable=AsyncMock)
         self.shutdown_patcher = patch.object(web.manager, "shutdown", new_callable=AsyncMock)
         self.init_patcher.start()
@@ -112,6 +119,9 @@ class TestWebEndpoints(unittest.TestCase):
     def tearDown(self):
         self.init_patcher.stop()
         self.shutdown_patcher.stop()
+        web.manager.__dict__.clear()
+        web.manager.__dict__.update(self.original_state)
+        self.tmp.cleanup()
 
     def test_index_serves_html(self):
         resp = self.client.get("/")
@@ -161,8 +171,8 @@ class TestWebEndpoints(unittest.TestCase):
         from telethon.tl.types import Channel
         resolve.return_value = Channel(id=123, title="Canal de Teste", photo=None, date=None)
         with tempfile.TemporaryDirectory() as tmpdir:
-            orig_jobs_file = web.JOBS_FILE
-            web.JOBS_FILE = os.path.join(tmpdir, "jobs_history.json")
+            original_db = web.manager.db
+            web.manager.db = QueueDatabase(os.path.join(tmpdir, "queue.db"))
             try:
                 web.manager.jobs = []
                 web.manager.client = MagicMock()
@@ -227,7 +237,7 @@ class TestWebEndpoints(unittest.TestCase):
             finally:
                 web.manager.queue_paused = False
                 web.manager.jobs = []
-                web.JOBS_FILE = orig_jobs_file
+                web.manager.db = original_db
 
     def test_sqlite_queue_endpoints(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -235,6 +245,8 @@ class TestWebEndpoints(unittest.TestCase):
             db = QueueDatabase(test_db)
             orig_db = downloader._queue_db
             set_queue_db(db)
+            original_db = web.manager.db
+            web.manager.db = db
             try:
                 # Enqueue some items
                 db.enqueue_item("test_web_chat", 101, "v1.mp4", "/tmp/v1.mp4", 1000)
@@ -264,6 +276,7 @@ class TestWebEndpoints(unittest.TestCase):
                 self.assertEqual(new_stats["pending"], 2)
             finally:
                 set_queue_db(orig_db)
+                web.manager.db = original_db
 
 
 if __name__ == "__main__":

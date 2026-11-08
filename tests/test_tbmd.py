@@ -386,3 +386,15 @@ class TestChannelFolders(unittest.TestCase):
             target = os.path.join(tmp, 'future_downloads')
             shortcuts = get_filesystem_shortcuts(target)
             self.assertEqual([item['path'] for item in shortcuts], [target])
+
+class TestQueueStateDatabase(unittest.TestCase):
+    def test_web_history_and_download_state_share_one_database_without_interference(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = QueueDatabase(os.path.join(tmp, 'tbmd.db'))
+            media = os.path.join(tmp, 'video.mp4')
+            with open(media, 'wb') as stream:
+                stream.write(b'media')
+            record_download({}, 'channel', 1, media, db=db)
+            db.save_web_queue([{'id': 'TK-1001', 'status': 'completed'}], 1001, True)
+            self.assertIn('1', db.export_to_state_dict()['channel'])
+            self.assertEqual(db.load_web_queue()['jobs'][0]['status'], 'completed')

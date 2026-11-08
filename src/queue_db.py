@@ -1,4 +1,5 @@
 import os
+import json
 import sqlite3
 import time
 from contextlib import contextmanager
@@ -68,6 +69,21 @@ class QueueDatabase:
                 CREATE INDEX IF NOT EXISTS idx_queue_status ON queue_items (status);
                 CREATE INDEX IF NOT EXISTS idx_queue_chat_msg ON queue_items (chat_id, message_id);
 
+                CREATE TABLE IF NOT EXISTS web_jobs (
+                    id TEXT PRIMARY KEY,
+                    position INTEGER NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN
+                        ('queued', 'scanning', 'downloading', 'cancelling', 'completed', 'cancelled', 'error')),
+                    payload TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_web_jobs_position ON web_jobs(position);
+
+                CREATE TABLE IF NOT EXISTS web_queue_state (
+                    id INTEGER PRIMARY KEY CHECK(id = 1),
+                    job_counter INTEGER NOT NULL CHECK(job_counter >= 1000),
+                    paused INTEGER NOT NULL CHECK(paused IN (0, 1))
+                );
+
                 CREATE TABLE IF NOT EXISTS telegram_session (
                     id INTEGER PRIMARY KEY CHECK(id = 1),
                     ciphertext BLOB NOT NULL,
@@ -80,6 +96,80 @@ class QueueDatabase:
                 );
                 """
             )
+
+    def load_web_queue(self) -> dict[str, Any] | None:
+        """Read one consistent queue snapshot; None means never initialized/migrated."""
+        with self.get_connection() as conn:
+            conn.execute("BEGIN")
+            state = conn.execute("SELECT job_counter, paused FROM web_queue_state WHERE id = 1").fetchone()
+            if state is None:
+                return None
+            jobs = []
+            for row in conn.execute("SELECT id, status, payload FROM web_jobs ORDER BY position"):
+                job = json.loads(row["payload"])
+                job.update(id=row["id"], status=row["status"])
+                jobs.append(job)
+            return {"jobs": jobs, "job_counter": state["job_counter"], "queue_paused": bool(state["paused"])}
+
+    @staticmethod
+    def _write_web_queue(conn, jobs: list[dict[str, Any]], counter: int, paused: bool) -> None:
+        """Replace jobs, FIFO order and metadata together, or roll back all changes."""
+        previous = conn.execute("SELECT job_counter FROM web_queue_state WHERE id = 1").fetchone()
+        counter = max(1000, int(counter), previous[0] if previous else 1000)
+        rows = []
+        for position, job in enumerate(jobs):
+            job_id = job.get("id")
+            if not isinstance(job_id, str) or not job_id:
+                raise ValueError("Job sem ID válido no histórico.")
+            if job_id.startswith("TK-") and job_id[3:].isdigit():
+                counter = max(counter, int(job_id[3:]))
+            payload = dict(job)
+            payload["status"] = payload.get("status", "queued")
+            payload["recent_logs"] = list(payload.get("recent_logs", []))[:250]
+            payload["active_workers"] = []  # Workers are transient, never restored.
+            rows.append((job_id, position, payload["status"], json.dumps(payload, ensure_ascii=False, allow_nan=False)))
+        conn.execute("DELETE FROM web_jobs")
+        conn.executemany("INSERT INTO web_jobs(id, position, status, payload) VALUES (?, ?, ?, ?)", rows)
+        conn.execute("""INSERT INTO web_queue_state(id, job_counter, paused) VALUES (1, ?, ?)
+                        ON CONFLICT(id) DO UPDATE SET job_counter=excluded.job_counter, paused=excluded.paused""",
+                     (counter, int(paused)))
+
+    def save_web_queue(self, jobs: list[dict[str, Any]], counter: int, paused: bool) -> None:
+        with self.get_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._write_web_queue(conn, jobs, counter, paused)
+
+    def import_web_queue_from_json(self, path: str) -> bool:
+        """One-time legacy import. Existing SQLite state, even empty, always wins.
+
+        A malformed file aborts without marking the migration or losing history.
+        The source is kept until the operator verifies restoration from SQLite.
+        """
+        if self.load_web_queue() is not None or not os.path.isfile(path):
+            return False
+        try:
+            with open(path, encoding="utf-8") as stream:
+                legacy = json.load(stream)
+            if isinstance(legacy, list):
+                jobs, counter, paused = legacy, 1000, False
+            elif isinstance(legacy, dict) and isinstance(legacy.get("jobs"), list):
+                jobs = legacy["jobs"]
+                counter = int(legacy.get("job_counter", 1000))
+                paused = legacy.get("queue_paused", False)
+                if not isinstance(paused, bool):
+                    raise ValueError("Estado de pausa inválido.")
+            else:
+                raise ValueError("Formato de histórico inválido.")
+            if not all(isinstance(job, dict) for job in jobs):
+                raise ValueError("Job inválido no histórico.")
+            with self.get_connection() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                if conn.execute("SELECT 1 FROM web_queue_state WHERE id = 1").fetchone():
+                    return False
+                self._write_web_queue(conn, jobs, counter, paused)
+        except (OSError, ValueError, TypeError, sqlite3.IntegrityError) as exc:
+            raise ValueError("Não foi possível importar jobs_history.json. Preserve o arquivo e corrija o histórico antes de iniciar.") from exc
+        return True
 
     def enqueue_item(
         self,

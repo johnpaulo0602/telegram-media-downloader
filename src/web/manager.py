@@ -1,6 +1,5 @@
 import asyncio
 from collections import deque
-import json
 import os
 import time
 from typing import Any
@@ -35,7 +34,6 @@ from src.utils import (
 )
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-JOBS_FILE = os.path.join(PROJECT_ROOT, "jobs_history.json")
 
 
 class WebDownloadManager:
@@ -79,56 +77,38 @@ class WebDownloadManager:
         self._last_broadcast: float = 0.0
         self._broadcast_pending: bool = False
 
-        self.load_jobs_history()
+        self._queue_db_path: str | None = None
+        self._last_queue_save = 0.0
+        self._stopping = False
 
-    def load_jobs_history(self):
-        """Load persisted jobs history from disk if available."""
-        if not os.path.exists(JOBS_FILE):
-            return
-        try:
-            with open(JOBS_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, dict):
-                loaded_jobs = data.get("jobs", [])
-                self.job_counter = int(data.get("job_counter", 1000))
-                self.queue_paused = bool(data.get("queue_paused", False))
-            elif isinstance(data, list):
-                loaded_jobs = data
-            else:
-                loaded_jobs = []
+    def load_queue_state(self):
+        """Import legacy state once, then restore the queue exclusively from SQLite."""
+        db = self.get_db()
+        for directory in dict.fromkeys((os.path.dirname(db.db_path), PROJECT_ROOT)):
+            db.import_web_queue_from_json(os.path.join(directory, "jobs_history.json"))
+        state = db.load_web_queue()
+        if state is None:
+            db.save_web_queue([], 1000, False)
+            state = db.load_web_queue()
+        self.jobs = state["jobs"]
+        self.job_counter = state["job_counter"]
+        self.queue_paused = state["queue_paused"]
+        # Preserve the previous recovery policy: queued jobs resume; interrupted
+        # jobs require an explicit retry rather than restarting a download silently.
+        for job in self.jobs:
+            if job.get("status") in ("scanning", "downloading", "cancelling"):
+                job.update(status="cancelled", error="Interrompido por reinicialização do servidor",
+                           finished_at=time.time(), active_workers=[], total_speed_bps=0,
+                           flood_wait_seconds=0, eta_seconds=None)
+        self._queue_db_path = db.db_path
+        self.persist_queue_state()
 
-            cleaned_jobs = []
-            for job in loaded_jobs:
-                if not isinstance(job, dict) or not job.get("id"):
-                    continue
-                if job.get("status") in ("scanning", "downloading", "cancelling"):
-                    job["status"] = "cancelled"
-                    job["error"] = "Interrompido por reinicialização do servidor"
-                    job["active_workers"] = []
-                    job["total_speed_bps"] = 0
-                cleaned_jobs.append(job)
-            self.jobs = cleaned_jobs
-        except (json.JSONDecodeError, OSError, ValueError):
-            self.jobs = []
-
-    def save_jobs_history(self):
-        """Persist jobs list and queue counter to disk."""
-        try:
-            serializable_jobs = []
-            for j in self.jobs[-100:]:
-                copy_j = dict(j)
-                copy_j["recent_logs"] = list(copy_j.get("recent_logs", []))[:150]
-                copy_j["active_workers"] = [] if copy_j.get("status") not in ("scanning", "downloading") else copy_j.get("active_workers", [])
-                serializable_jobs.append(copy_j)
-            payload = {
-                "job_counter": self.job_counter,
-                "queue_paused": self.queue_paused,
-                "jobs": serializable_jobs,
-            }
-            with open(JOBS_FILE, "w", encoding="utf-8") as f:
-                json.dump(payload, f, indent=2, ensure_ascii=False)
-        except OSError:
-            pass
+    def persist_queue_state(self):
+        """Persist all jobs (including every queued job) and queue metadata atomically."""
+        self._sync_active_job_metrics()
+        db = self.get_db()
+        db.save_web_queue(self.jobs, self.job_counter, self.queue_paused)
+        self._last_queue_save = time.monotonic()
 
     def _next_job_id(self) -> str:
         self.job_counter += 1
@@ -157,6 +137,9 @@ class WebDownloadManager:
         self.config = settings.to_dict()
         self.config_error = None
         self.db = get_queue_db(self.config.get("db_path"))
+        if self._queue_db_path != self.db.db_path:
+            self.load_queue_state()
+        self._stopping = False
 
         if self.client is not None:
             try:
@@ -197,13 +180,17 @@ class WebDownloadManager:
         return self.db
 
     async def shutdown(self):
+        self._stopping = True
         await self.auth._reset_auth_client()
         if self.active_Session:
             self.active_Session.cancelled = True
-        if self.active_task and not self.active_task.done():
-            self.active_task.cancel()
-        if self.queue_runner_task and not self.queue_runner_task.done():
-            self.queue_runner_task.cancel()
+        tasks = {t for t in (self.active_task, self.queue_runner_task) if t and not t.done()}
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        if self.db is not None:
+            self.persist_queue_state()
         if self.client:
             try:
                 await self.client.disconnect()
@@ -372,6 +359,10 @@ class WebDownloadManager:
         }
 
     async def broadcast_state(self, force: bool = False):
+        # Checkpoint live metrics even without a browser connected; lifecycle
+        # transitions are persisted immediately by the queue operations.
+        if self.current_job_id and self.db is not None and time.monotonic() - self._last_queue_save >= 2:
+            self.persist_queue_state()
         if not self.ws_clients:
             self._sync_active_job_metrics()
             return
@@ -667,7 +658,7 @@ class WebDownloadManager:
             ],
         }
         self.jobs.append(new_job)
-        self.save_jobs_history()
+        self.persist_queue_state()
 
         self._ensure_queue_processor()
         await asyncio.sleep(0)
@@ -683,7 +674,7 @@ class WebDownloadManager:
                 pass
 
     async def _process_queue(self):
-        while True:
+        while not self._stopping:
             if self.queue_paused or not self.client or not self.authorized:
                 break
 
@@ -697,7 +688,7 @@ class WebDownloadManager:
                 break
 
             await self._execute_job(next_job)
-            self.save_jobs_history()
+            self.persist_queue_state()
 
     async def _execute_job(self, job: dict[str, Any]):
         job_id = job["id"]
@@ -736,6 +727,7 @@ class WebDownloadManager:
             "skipped": 0,
             "failed_count": 0,
         }
+        self.persist_queue_state()
         await self.broadcast_state(force=True)
 
         self.active_task = asyncio.current_task()
@@ -869,7 +861,7 @@ class WebDownloadManager:
             self._add_log("error", chat_input, f"Falha no job: {e}")
             await self.broadcast_state(force=True)
         finally:
-            self._sync_active_job_metrics()
+            self.persist_queue_state()
             self.active_Session = None
 
     async def cancel_job(self, job_id: str | None = None) -> dict[str, Any]:
@@ -880,7 +872,7 @@ class WebDownloadManager:
             job["status"] = "cancelled"
             job["finished_at"] = time.time()
             self._add_log("warning", job.get("chat_title", ""), "Job removido da fila pelo usuário.", job_id=job["id"])
-            self.save_jobs_history()
+            self.persist_queue_state()
             await self.broadcast_state(force=True)
             return self.get_snapshot()
 
@@ -892,7 +884,7 @@ class WebDownloadManager:
             if self.active_task and not self.active_task.done():
                 self.active_task.cancel()
             await asyncio.sleep(0)
-            self.save_jobs_history()
+            self.persist_queue_state()
             await self.broadcast_state(force=True)
         return self.get_snapshot()
 
@@ -906,7 +898,7 @@ class WebDownloadManager:
         if self.current_job_id == job_id:
             self.current_job_id = None
             self.job_status = "idle"
-        self.save_jobs_history()
+        self.persist_queue_state()
         await self.broadcast_state(force=True)
         return self.get_snapshot()
 
@@ -925,7 +917,7 @@ class WebDownloadManager:
 
         if prev_queued_idx is not None:
             self.jobs[prev_queued_idx], self.jobs[idx] = self.jobs[idx], self.jobs[prev_queued_idx]
-            self.save_jobs_history()
+            self.persist_queue_state()
             await self.broadcast_state(force=True)
         return self.get_snapshot()
 
@@ -935,6 +927,15 @@ class WebDownloadManager:
             raise HTTPException(status_code=404, detail="Job não encontrado.")
         if job.get("status") in ("scanning", "downloading", "cancelling"):
             raise HTTPException(status_code=400, detail="Este job já está em execução.")
+
+        if self.current_job_id == job_id:
+            # Retrying the most recent job must not have its queued status
+            # overwritten by the previous run's live metrics on the next save.
+            self.current_job_id = None
+            self.job_status = "idle"
+            self.job_info = {}
+            self.started_at = self.finished_at = None
+            self.total_files = self.completed_bytes = 0
 
         job.update({
             "status": "queued",
@@ -953,7 +954,7 @@ class WebDownloadManager:
             "active_workers": [],
         })
         self._add_log("info", job.get("chat_title", ""), "Job re-enfileirado para execução.", job_id=job_id)
-        self.save_jobs_history()
+        self.persist_queue_state()
         self._ensure_queue_processor()
         await asyncio.sleep(0)
         await self.broadcast_state(force=True)
@@ -967,7 +968,7 @@ class WebDownloadManager:
         if self.current_job_id and not self._get_job(self.current_job_id):
             self.current_job_id = None
             self.job_status = "idle"
-        self.save_jobs_history()
+        self.persist_queue_state()
         await self.broadcast_state(force=True)
         return self.get_snapshot()
 
@@ -976,7 +977,7 @@ class WebDownloadManager:
             self.queue_paused = not self.queue_paused
         else:
             self.queue_paused = bool(paused)
-        self.save_jobs_history()
+        self.persist_queue_state()
         if not self.queue_paused:
             self._ensure_queue_processor()
             await asyncio.sleep(0)
