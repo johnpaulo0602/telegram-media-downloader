@@ -280,13 +280,9 @@ O Telethon grava a `auth_key` de 256 bytes em claro tanto no arquivo `.session` 
 
 Um `default_session.session` existente já é SQLite do Telethon, mas contém a chave de autenticação em claro. CLI e web importam esse arquivo para a tabela criptografada `telegram_session` quando o banco ainda não contém sessão. Novos logins da CLI usam sessão em memória e persistem somente no banco criptografado.
 
-No Docker, para importar o arquivo legado do host, use uma vez:
+O Compose padrão não monta sessões legadas e não requer arquivo de migração. Para instalações antigas que ainda precisam importar uma sessão, adicione temporariamente um bind mount do arquivo existente ao `docker-compose.yml` local (por exemplo, `./default_session.session:/app/default_session.session`). Confirme antes que a origem é um arquivo, para o Docker não criar um diretório no lugar dele. Após validar a autenticação no painel e a restauração pelo banco, retire o mount, recrie o container e remova o arquivo legado local.
 
-```bash
-docker compose -f docker-compose.yml -f docker-compose.migrate.yml up -d --build
-```
-
-Confirme que o painel está autenticado e reinicie com `docker compose up -d` para retirar o mount legado. O original é preservado; remova-o manualmente após confirmar a migração. Se já houver sessão no banco, ela tem prioridade. Não apague o banco para forçar migração: ele também contém a fila.
+Se já houver sessão no banco, ela tem prioridade. Não apague o banco para forçar migração: ele também contém a fila. Arquivos `.session` nunca devem ser versionados.
 
 ### Protegendo o painel
 
@@ -366,13 +362,23 @@ Acesse `http://localhost:8000` (ou o IP do servidor no homelab). A interface ofe
 ### Docker Compose
 
 1. Configure `.env`, incluindo `TBMD_SESSION_KEY` e, para proteger o painel, `TBMD_WEB_TOKEN`. Faça login diretamente no painel por QR ou telefone; não é necessário gerar arquivo `.session`.
-2. Suba o container:
+2. Copie o exemplo versionado e ajuste os volumes e portas na sua configuração local:
+
+   ```bash
+   cp docker-compose.example.yml docker-compose.yml
+   ```
+
+   `docker-compose.example.yml` é o modelo do repositório. `docker-compose.yml` fica no `.gitignore`, permitindo configurações próprias em cada instalação. Ao atualizar o projeto, compare o exemplo com seu arquivo local antes de incorporar mudanças.
+
+3. Suba o container:
 
    ```bash
    docker compose up -d --build
    ```
 
 O volume nomeado `tbmd-data` preserva `/app/data/tbmd.db` e seus arquivos WAL entre recriações. Não execute `docker compose down -v` se quiser preservar sessão e fila. A CLI local usa outro banco por padrão; para compartilhar o banco do container, execute `docker compose exec tbmd-web python src/tbmd.py --list`. Mantenha o mesmo `TBMD_SESSION_KEY` entre reinícios.
+
+O arquivo `jobs_history.json` continua necessário para o histórico de jobs do painel, contador e pausa da fila; ele é local e ignorado pelo Git. Ele é separado do SQLite que registra os itens de mídia e a sessão criptografada. Atualmente fica na raiz da aplicação (`/app/jobs_history.json` no container), fora do volume `tbmd-data`; sem um mount adicional, esse histórico web não sobrevive à recriação do container.
 
 No passo 3, o único atalho recomendado é `DOWNLOAD_DIR` (`/downloads` no container), apontando para o volume persistente. Você pode navegar e escolher outra pasta base.
 

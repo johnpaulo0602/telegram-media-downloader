@@ -18,7 +18,7 @@ services:
       - tbmd-data:/app/data
       # Pasta padrão de downloads mapeada para o host/homelab
       - ./downloads:/downloads
-      # Exemplos de volumes extras do Homelab / NAS que aparecerão automaticamente na Web UI:
+      # Volumes extras opcionais do Homelab / NAS, acessíveis pelo navegador de pastas:
       # - /mnt/storage/media:/media
       # - /mnt/nas:/mnt/nas
 

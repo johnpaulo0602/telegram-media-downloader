@@ -175,4 +175,11 @@ python3 -m unittest discover tests
 - Before committing, run the test suite and review `git status` to confirm no
   credentials, session files, or databases are staged.
 
-Authentication lifecycle: `TelegramAuthService._finalize()` notifies the manager through `on_authorized`; keep manager, queue and WebSocket authentication state synchronized. CLI clients use `StringSession`, save after context entry (Telethon auto-authenticates there), and import legacy SQLite sessions only when no encrypted session exists. Docker legacy import is opt-in via `docker-compose.migrate.yml`.
+Authentication lifecycle: `TelegramAuthService._finalize()` notifies the manager through `on_authorized`; keep manager, queue and WebSocket authentication state synchronized. CLI clients use `StringSession`, save after context entry (Telethon auto-authenticates there), and import legacy SQLite sessions only when no encrypted session exists. Docker legacy import, when needed, uses a temporary bind mount in the local Compose file; remove it after validating encrypted session restoration. No dedicated migration Compose is required.
+
+
+## 8. Local deployment files
+
+- Track only `docker-compose.example.yml` as the deployment template. Copy it to `docker-compose.yml` for local use; the latter must remain ignored and must never be staged. Document template changes in README.md.
+- Legacy `*.session` files are only migration inputs. After confirming the encrypted database session is authorized and survives container recreation without a legacy mount, remove the obsolete local session. Never commit authentication files.
+- `jobs_history.json` is still used by `WebDownloadManager` for web jobs, the job counter and queue pause state. Keep it local and ignored; do not remove it as redundant with SQLite. Its current `/app/jobs_history.json` location is outside the named database volume and needs a separate mount to persist across container recreation.

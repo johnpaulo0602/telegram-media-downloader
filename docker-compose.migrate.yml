@@ -1,9 +1,0 @@
-# Uso único: docker compose -f docker-compose.yml -f docker-compose.migrate.yml up -d
-services:
-  tbmd-web:
-    volumes:
-      - type: bind
-        source: ./${SESSION_NAME:-default_session}.session
-        target: /app/${SESSION_NAME:-default_session}.session
-        bind:
-          create_host_path: false

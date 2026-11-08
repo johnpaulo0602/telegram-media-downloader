@@ -94,3 +94,6 @@ Icon?
 Thumbs.db
 ehthumbs.db
 Desktop.ini
+
+# Local Docker deployment configuration (copy from the tracked example)
+/docker-compose.yml
