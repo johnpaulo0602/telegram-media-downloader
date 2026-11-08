@@ -1,22 +1,22 @@
 <div align="center">
 
-# Telegram Media Downloader
+<img src="assets/banner.svg" alt="Telegram Media Downloader — baixe mídias em lote de canais, grupos e chats privados do Telegram" width="100%">
+
+<br>
 
 ![Python](https://img.shields.io/badge/python-3.8%2B-3776AB?logo=python&logoColor=white)
 ![Telethon](https://img.shields.io/badge/telethon-1.38%2B-2AABEE?logo=telegram&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688?logo=fastapi&logoColor=white)
 ![Rich](https://img.shields.io/badge/rich-13.7%2B-FAE742?logo=rich&logoColor=white)
-![License](https://img.shields.io/badge/license-GPL--3.0-blue?logo=gnu&logoColor=white)
+![Docker](https://img.shields.io/badge/docker%20compose-pronto-2496ED?logo=docker&logoColor=white)
 ![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS%20%7C%20Windows-lightgrey)
-![Docker](https://img.shields.io/badge/docker-compose-ready-2496ED?logo=docker&logoColor=white)
+![License](https://img.shields.io/badge/license-GPL--3.0-blue?logo=gnu&logoColor=white)
 
-**Baixe mídias em lote de canais, grupos e chats privados do Telegram.**
+**CLI em Python e painel web para homelab** com downloads simultâneos, fila persistente
+em SQLite, retomada automática, renomeação inteligente e sessão do Telegram
+criptografada em repouso.
 
-CLI em Python com downloads simultâneos, fila persistente em SQLite, retomada de
-downloads interrompidos, renomeação automática de arquivos e um painel web para
-homelab com progresso em tempo real.
-
-[Instalação](#instalação) · [Uso](#uso) · [Arquitetura](#arquitetura) · [Configuração](#configuração)
+[Começo rápido](#começo-rápido) · [Como funciona](#como-funciona) · [Uso](#uso) · [Configuração](#configuração) · [API](#api-http)
 
 </div>
 
@@ -24,12 +24,18 @@ homelab com progresso em tempo real.
 
 ## Sumário
 
+- [Começo rápido](#começo-rápido)
 - [Funcionalidades](#funcionalidades)
-- [Arquitetura](#arquitetura)
-- [Fluxo de um download](#fluxo-de-um-download)
+- [Como funciona](#como-funciona)
+  - [Arquitetura](#arquitetura)
+  - [Fluxo de um download](#fluxo-de-um-download)
+  - [Downloads simultâneos](#downloads-simultâneos)
+  - [Ciclo de vida de jobs e itens](#ciclo-de-vida-de-jobs-e-itens)
+  - [Autenticação e sessão criptografada](#autenticação-e-sessão-criptografada)
 - [Requisitos](#requisitos)
 - [Instalação](#instalação)
 - [Configuração](#configuração)
+- [Autenticação](#autenticação)
 - [Uso](#uso)
   - [Modo interativo](#modo-interativo)
   - [Linha de comando](#linha-de-comando)
@@ -44,94 +50,51 @@ homelab com progresso em tempo real.
 
 ---
 
-## Funcionalidades
+## Começo rápido
 
-- **Autenticação pela própria sessão do Telegram** — faça login no painel web por QR Code ou telefone; a sessão fica guardada **criptografada** no SQLite (AES-256-GCM), sem arquivo `.session` solto em disco.
-- **Downloads simultâneos** — paralelismo controlado por `asyncio.Semaphore`, aproveitando a banda sem estourar o limite da API do Telegram.
-- **Fila persistente em SQLite** — cada mídia é registrada em `tbmd.db` (modo WAL) com status, tentativas e caminho de destino; a fila sobrevive a reinícios do servidor.
-- **Retomada automática** — downloads concluídos são reconhecidos e ignorados, tanto pelo `download_state.json` quanto pelo banco SQLite.
-- **Resolução flexível de chat** — aceita `@usuario`, `https://t.me/usuario`, IDs numéricos e IDs completos de canal (`-100...`).
-- **Busca de chats sem acento** — a busca ignora maiúsculas e acentos (`musica` encontra "Música") e também casa por username, link ou ID.
-- **Renomeação inteligente** — usa a legenda da mensagem, ou o nome original do documento, ou a extensão do MIME; remove caracteres inválidos, trunca títulos longos e prefixa o ID da mensagem para evitar colisões.
-- **Filtragem por tipo de mídia** — imagens, vídeos, PDFs, ZIP e compactados, áudios e todos os tipos.
-- **Tratamento de `FloodWaitError`** — espera exatamente o tempo de penalidade do Telegram e retoma o download automaticamente.
-- **Painel web para homelab** — fila FIFO de jobs, seleção de canais, explorador de pastas do host/Docker, telemetria de velocidade e disco, e progresso ao vivo via WebSocket.
-- **Interface de linha de comando** — modo interativo com menus ou execução 100% não interativa por flags.
+```bash
+git clone https://github.com/johnpaulo0602/telegram-media-downloader.git
+cd telegram-media-downloader
+python3 -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env   # preencha API_ID, API_HASH e TBMD_SESSION_KEY
+
+python src/tbmd.py          # CLI interativa
+python src/tbmd.py --web    # painel web em http://localhost:8000
+```
+
+> Prefere container? Veja [Docker Compose](#docker-compose).
 
 ---
 
-## Arquitetura
+## Funcionalidades
+
+| | |
+|---|---|
+| **Login pela própria sessão do Telegram** | QR Code ou telefone (com 2FA) direto no painel. A sessão fica **criptografada** no SQLite (AES-256-GCM) — sem arquivo `.session` solto em disco. |
+| **Downloads simultâneos** | Paralelismo controlado por `asyncio.Semaphore`, aproveitando a banda sem estourar o limite da API. |
+| **Fila persistente em SQLite** | Cada mídia é registrada em `tbmd.db` (modo WAL) com status, tentativas e destino; a fila sobrevive a reinícios. |
+| **Retomada automática** | Itens já baixados são reconhecidos e ignorados, tanto pelo `download_state.json` legado quanto pelo SQLite. |
+| **Resolução flexível de chat** | Aceita `@usuario`, `https://t.me/usuario`, IDs numéricos e IDs completos de canal (`-100...`). |
+| **Busca sem acento** | `musica` encontra "Música"; também casa por username, link ou ID. |
+| **Renomeação inteligente** | Usa a legenda, o nome original ou a extensão do MIME; sanitiza, trunca e prefixa o ID da mensagem para evitar colisões. |
+| **Filtro por tipo** | Imagens, vídeos, PDFs, ZIP/compactados, áudios ou tudo. |
+| **`FloodWaitError` tratado** | Espera exatamente a penalidade do Telegram e retoma sozinho. |
+| **Painel web para homelab** | Fila FIFO de jobs, seleção de canais, explorador de pastas do host/Docker, telemetria de velocidade e disco, progresso ao vivo via WebSocket. |
+| **CLI completa** | Menus interativos ou execução 100% não interativa por flags. |
+
+---
+
+## Como funciona
+
+### Arquitetura
 
 O projeto separa o **núcleo** (motor de download, fila e utilitários) das
-**interfaces** (CLI e web), de modo que ambas reaproveitam exatamente o mesmo
-código:
+**interfaces** (CLI e web): ambas reaproveitam exatamente o mesmo código.
 
-```mermaid
-flowchart TB
-    subgraph Entrada["Entrada"]
-        TBMD["src/tbmd.py<br/>entrypoint"]
-    end
-
-    subgraph Interfaces["Interfaces"]
-        CLI["src/cli/main.py<br/>argparse + Questionary"]
-        UI["src/cli/ui.py<br/>tabelas Rich"]
-        APP["src/web/app.py<br/>FastAPI + WebSocket"]
-        MGR["src/web/manager.py<br>FIFO de jobs"]
-        AUTH["src/web/auth.py<br/>QR / telefone + 2FA"]
-        ROTAS["src/web/routes/*<br/>auth · downloads · queue · fs"]
-    end
-
-    subgraph Nucleo["Núcleo (independente da interface)"]
-        SET["src/settings.py<br/>Settings tipadas"]
-        MOD["src/models.py<br/>enums + dataclasses + Pydantic"]
-        UTIL["src/utils.py<br/>nomes, MIME, parsing de chat"]
-        QDB["src/queue_db.py<br/>repositório SQLite"]
-        DL["src/downloader.py<br/>Telethon + workers"]
-        SS["src/session_store.py<br/>AES-256-GCM + scrypt"]
-    end
-
-    subgraph Externos["Externos"]
-        TG["Telegram<br/>MTProto"]
-        DISCO[("downloads/")]
-        DB[("tbmd.db")]
-    end
-
-    TBMD --> CLI
-    CLI --> UI
-    CLI --> DL
-    CLI --> SET
-    CLI --> SS
-
-    APP --> MGR
-    APP --> ROTAS
-    MGR --> DL
-    MGR --> QDB
-    MGR --> AUTH
-    ROTAS --> QDB
-    ROTAS --> AUTH
-
-    DL --> SET
-    DL --> UTIL
-    DL --> MOD
-    DL --> QDB
-    AUTH --> SS
-    SS --> QDB
-    QDB --> DB
-    DL --> TG
-    DL --> DISCO
-
-    classDef entrada fill:#1e3a5f,stroke:#38bdf8,color:#e0f2fe
-    classDef interface fill:#3f2d5c,stroke:#c084fc,color:#f3e8ff
-    classDef nucleo fill:#1f3f34,stroke:#34d399,color:#ecfdf5
-    classDef externo fill:#4a2626,stroke:#f87171,color:#fee2e2
-
-    class TBMD entrada
-    class CLI,UI,APP,MGR,ROTAS,AUTH interface
-    class SET,MOD,UTIL,QDB,DL,SS nucleo
-    class TG,DISCO,DB externo
-```
-
-### Módulos
+<p align="center">
+  <img src="assets/architecture.svg" alt="Diagrama de arquitetura: src/tbmd.py chama a CLI; a CLI e o app FastAPI usam o mesmo núcleo (settings, downloader, queue_db, session_store, utils, models), que fala com o Telegram, a pasta downloads/ e o banco tbmd.db" width="100%">
+</p>
 
 | Módulo | Responsabilidade |
 |---|---|
@@ -144,41 +107,47 @@ flowchart TB
 | `src/downloader.py` | Motor Telethon: sessões, workers concorrentes, eventos de progresso |
 | `src/cli/main.py` | Parser de argumentos e loop principal da CLI |
 | `src/cli/ui.py` | Tabelas Rich e menus interativos Questionary |
-| `src/web/app.py` | Aplicação FastAPI, lifespan e WebSocket |
+| `src/web/app.py` | Aplicação FastAPI, lifespan, token de acesso e WebSocket |
 | `src/web/manager.py` | `WebDownloadManager`: orquestra jobs FIFO e o processador da fila |
-| `src/web/routes/` | Roteadores separados: `downloads.py`, `queue.py`, `filesystem.py` |
+| `src/web/auth.py` | Login por QR Code / telefone + 2FA |
+| `src/web/routes/` | Roteadores separados: `auth.py`, `downloads.py`, `queue.py`, `filesystem.py` |
 
----
+### Fluxo de um download
 
-## Fluxo de um download
+Do pedido do usuário ao resumo final — a CLI e o painel web seguem o mesmo caminho:
 
-```mermaid
-sequenceDiagram
-    actor U as Usuário
-    participant CLI as CLI / Web UI
-    participant DL as downloader.py
-    participant DB as queue_db.py
-    participant TG as Telegram
+<p align="center">
+  <img src="assets/download-flow.svg" alt="Diagrama de sequência: o usuário escolhe chat, tipo e pasta; a interface busca as mensagens no Telegram; o downloader pré-enfileira tudo no SQLite e, para cada mídia em paralelo, marca o início, verifica se já existe, pula ou baixa e marca como concluída; ao final a interface mostra o resumo" width="100%">
+</p>
 
-    U->>CLI: escolhe chat, tipo e pasta
-    CLI->>TG: busca mensagens (filtro por tipo)
-    TG-->>CLI: lista de mensagens
-    CLI->>DL: download_media_list(mensagens, sessão)
-    DL->>DB: enqueue_batch() — pré-enfileira tudo
-    DB-->>DL: itens enfileirados
-    loop cada mídia (em paralelo, até BATCH_SIZE)
-        DL->>DB: mark_started()
-        DL->>DB: is_downloaded() — já existe?
-        alt já baixado
-            DL->>DB: mark_skipped()
-        else novo
-            DL->>TG: download_media(progresso)
-            TG-->>DL: bytes recebidos
-            DL->>DB: mark_completed()
-        end
-    end
-    CLI-->>U: resumo (baixados, pulados, falhas)
-```
+### Downloads simultâneos
+
+Os itens pendentes passam por um `asyncio.Semaphore(BATCH_SIZE)`: no máximo
+`BATCH_SIZE` workers baixam ao mesmo tempo. Um worker que recebe `FloodWaitError`
+aguarda a penalidade e retoma; arquivos que já existem são marcados como `skipped`
+sem tráfego de rede.
+
+<p align="center">
+  <img src="assets/parallel-workers.svg" alt="Animação: itens pendentes passam pelo semáforo e ocupam cinco workers; um conclui, outro continua baixando, um aguarda FloodWait e retoma, um é pulado por já existir" width="100%">
+</p>
+
+### Ciclo de vida de jobs e itens
+
+Há dois níveis de estado: o **job** do painel (um pedido de download, na fila FIFO)
+e cada **item de mídia** registrado no SQLite.
+
+<p align="center">
+  <img src="assets/job-lifecycle.svg" alt="Máquinas de estado: job queued, scanning, downloading e então completed, error ou cancelling/cancelled, com retry de volta para queued; item pending, downloading e então completed, skipped, failed ou cancelled, com retry-failed de volta para pending" width="100%">
+</p>
+
+### Autenticação e sessão criptografada
+
+<p align="center">
+  <img src="assets/auth-flow.svg" alt="Fluxo de autenticação: login por QR Code ou telefone gera a auth_key do Telegram, que é criptografada com AES-256-GCM usando uma chave derivada por scrypt de TBMD_SESSION_KEY e salva na tabela telegram_session do tbmd.db; sessões legadas são importadas uma vez; o painel é protegido por TBMD_WEB_TOKEN e cookie httpOnly" width="100%">
+</p>
+
+> Todos os diagramas são SVGs estáticos em [`assets/`](assets/), com animações em CSS/SMIL
+> que respeitam `prefers-reduced-motion`.
 
 ---
 
@@ -254,11 +223,19 @@ O Telethon pede o número de telefone, o código de login e, se necessário, a s
 | `WEB_HOST` | `127.0.0.1` | Host do servidor web |
 | `WEB_PORT` | `8000` | Porta do servidor web |
 
-Pastas de destino por tipo de mídia: `images`, `videos`, `pdfs`, `archives`, `audio` e `all_media`.
+Pastas de destino por tipo de mídia (CLI): `images`, `videos`, `pdfs`, `archives`, `audio` e `all_media`.
+
+> Gere uma `TBMD_SESSION_KEY` forte com:
+>
+> ```bash
+> python -c "import secrets; print(secrets.token_urlsafe(32))"
+> ```
 
 ---
 
 ## Autenticação
+
+> Visão geral no diagrama [Autenticação e sessão criptografada](#autenticação-e-sessão-criptografada).
 
 A sessão do Telegram **é** a autenticação: se ela existir no banco, você já entra; se não, o painel mostra a tela de login.
 
@@ -402,6 +379,8 @@ O painel sempre cria uma subpasta com o nome real do canal em `snake_case`: por 
 ---
 
 ## Fila persistente e retomada
+
+> Os estados abaixo aparecem no diagrama [Ciclo de vida de jobs e itens](#ciclo-de-vida-de-jobs-e-itens).
 
 Todo item baixado é registrado no SQLite (`tbmd.db`, modo WAL) com status, número de tentativas e caminho de destino:
 
