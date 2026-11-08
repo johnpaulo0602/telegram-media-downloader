@@ -25,6 +25,7 @@ from src.settings import load_settings
 from src.web.auth import TelegramAuthService
 from src.utils import (
     MEDIA_TYPES,
+    channel_folder_name,
     dialog_kind,
     filter_media_messages,
     get_media_filename,
@@ -209,23 +210,10 @@ class WebDownloadManager:
             except Exception:
                 pass
 
-    def resolve_destination(self, custom_dir: str | None, media_type: str | list[str], append_type_folder: bool) -> str:
-        base_default = (self.config or {}).get("download_dir", "downloads")
-        if isinstance(media_type, list):
-            effective_key = media_type[0] if len(media_type) == 1 else "all"
-        else:
-            effective_key = media_type
-        media_folder = MEDIA_TYPES.get(effective_key, MEDIA_TYPES["all"])["folder"]
-
-        if custom_dir and custom_dir.strip():
-            base = os.path.abspath(os.path.expanduser(custom_dir.strip()))
-        else:
-            base = os.path.abspath(os.path.expanduser(base_default))
-
-        if append_type_folder:
-            if os.path.basename(base).lower() != media_folder.lower():
-                return os.path.join(base, media_folder)
-        return base
+    def resolve_destination(self, custom_dir: str | None, chat_title: str, chat_id: str = "") -> str:
+        base = (custom_dir or "").strip() or (self.config or {}).get("download_dir", "downloads")
+        base = os.path.abspath(os.path.expanduser(base))
+        return os.path.join(base, channel_folder_name(chat_title, chat_id))
 
     def _sync_active_job_metrics(self):
         job = self._get_job(self.current_job_id)
@@ -573,10 +561,10 @@ class WebDownloadManager:
             limit=limit,
         )
         media_messages = filter_media_messages(messages, media_types)
-        dest_dir = self.resolve_destination(req.dest_dir, media_types, req.append_type_folder)
         state = load_state()
         chat_id = str(getattr(channel, "id", req.chat))
         chat_title = utils.get_display_name(channel) or str(req.chat)
+        dest_dir = self.resolve_destination(req.dest_dir, chat_title, chat_id)
 
         already_count = 0
         total_bytes = 0
@@ -621,14 +609,20 @@ class WebDownloadManager:
         media_types = normalize_media_types(req.media_type, req.media_types)
         media_labels = [MEDIA_TYPES[k]["label"] for k in media_types]
 
-        dest_dir = self.resolve_destination(req.dest_dir, media_types, req.append_type_folder)
+        try:
+            channel = await resolve_channel(self.client, req.chat)
+        except Exception as exc:
+            raise HTTPException(400, "Não foi possível encontrar o canal para definir a pasta de destino.") from exc
+        if channel is None:
+            raise HTTPException(400, "Informe um canal válido.")
+        initial_title = utils.get_display_name(channel) or req.chat.strip()
+        dest_dir = self.resolve_destination(req.dest_dir, initial_title, str(getattr(channel, "id", req.chat)))
         batch_size = max(1, req.batch_size or (self.config or {}).get("batch_size", 5))
         limit = req.message_limit if req.message_limit is not None else (self.config or {}).get("message_limit", 2000)
         effective_limit = limit if (limit and limit > 0) else None
 
         job_id = self._next_job_id()
         now = time.time()
-        initial_title = (req.chat_title or "").strip() or req.chat.strip()
 
         new_job: dict[str, Any] = {
             "id": job_id,
@@ -640,7 +634,6 @@ class WebDownloadManager:
             "media_label": " + ".join(media_labels),
             "media_labels": media_labels,
             "dest_dir": dest_dir,
-            "append_type_folder": req.append_type_folder,
             "batch_size": batch_size,
             "message_limit": effective_limit,
             "status": "queued",

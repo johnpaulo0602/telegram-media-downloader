@@ -290,35 +290,22 @@ def is_running_in_docker() -> bool:
     return False
 
 
+def channel_folder_name(title: str, chat_id: str = "") -> str:
+    """Normalize a Telegram title into one portable snake_case path component."""
+    normalized = unicodedata.normalize("NFKD", title).encode("ascii", "ignore").decode()
+    slug = re.sub(r"[^a-z0-9]+", "_", normalized.lower()).strip("_")[:100].rstrip("_")
+    if not slug:
+        slug = "canal_" + (re.sub(r"[^a-z0-9]+", "_", str(chat_id).lower()).strip("_") or "telegram")
+    if slug in {"con", "prn", "aux", "nul"} or re.fullmatch(r"(?:com|lpt)[1-9]", slug):
+        slug = "canal_" + slug
+    return slug
+
+
 def get_filesystem_shortcuts(default_download_dir: str) -> list[dict[str, str]]:
-    """Return helpful root/volume shortcuts depending on Host vs Docker environment."""
-    shortcuts = []
-    seen = set()
-
-    def add_shortcut(label: str, raw_path: str, icon: str = "folder"):
-        abs_path = os.path.abspath(os.path.expanduser(raw_path))
-        if abs_path not in seen and (os.path.isdir(abs_path) or abs_path == os.path.abspath(default_download_dir)):
-            seen.add(abs_path)
-            shortcuts.append({"label": label, "path": abs_path, "icon": icon})
-
-    add_shortcut("Downloads (Padrão)", default_download_dir, "download")
-    add_shortcut("Home (~)", "~", "home")
-
-    candidate_mounts = [
-        ("/downloads", "Volume /downloads", "hard-drive"),
-        ("/media", "Volume /media", "hard-drive"),
-        ("/mnt", "Volume /mnt", "hard-drive"),
-        ("/data", "Volume /data", "hard-drive"),
-        ("/storage", "Volume /storage", "hard-drive"),
-        ("/Volumes", "Volumes (macOS)", "hard-drive"),
-    ]
-    for mount_path, label, icon in candidate_mounts:
-        if os.path.isdir(mount_path):
-            add_shortcut(label, mount_path, icon)
-
-    root_path = os.path.abspath(os.sep)
-    add_shortcut(f"Raiz ({root_path})", root_path, "server")
-    return shortcuts
+    """Recommend only the configured persistent downloads volume."""
+    return [{"label": "Downloads (Padrão)",
+             "path": os.path.abspath(os.path.expanduser(default_download_dir)),
+             "icon": "download"}]
 
 
 def browse_directory(target_path: str | None, default_dir: str, show_hidden: bool = False) -> dict[str, Any]:

@@ -783,11 +783,7 @@
             <div id="fs-dirs-list" class="max-h-48 overflow-y-auto divide-y divide-borderSubtle/60 text-xs"></div>
           </div>
 
-          <!-- Auto Subfolder Toggle -->
-          <label class="flex items-center space-x-2.5 text-xs text-slate-300 cursor-pointer pt-1">
-            <input id="wiz-append-subfolder" type="checkbox" checked class="rounded bg-bgBase border-borderHighlight text-telegram focus:ring-0" />
-            <span>Criar subpasta automática por categoria (ex: <code class="font-mono text-slate-400">/videos</code>, <code class="font-mono text-slate-400">/pdfs</code> ou <code class="font-mono text-slate-400">/all</code>)</span>
-          </label>
+          <p class="text-xs text-slate-300 pt-1">Uma subpasta com o nome do canal em <code>snake_case</code> será criada automaticamente dentro da pasta escolhida. Todos os tipos de mídia ficarão nessa pasta.</p>
         </div>
 
         <!-- STEP 4: RESUMO, PREVIEW & FILA -->
@@ -2011,6 +2007,14 @@
     }
 
     // --- STEP 4: SUMMARY, PREVIEW & SUBMIT ---
+    function channelFolderPreview(title, chat) {
+      let slug = (title || '').normalize('NFKD').replace(/[^\x00-\x7F]/g, '')
+        .toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 100).replace(/_+$/g, '');
+      if (!slug) slug = 'canal_' + (String(chat || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'telegram');
+      if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/.test(slug)) slug = 'canal_' + slug;
+      return slug;
+    }
+
     function populateWizardSummary() {
       const mediaTypes = getSelectedWizardMediaTypes();
       const labels = mediaTypes.map(k => (MEDIA_BADGE_STYLES[k] ? MEDIA_BADGE_STYLES[k].label : k));
@@ -2018,14 +2022,13 @@
       const limitVal = unlim ? null : (parseInt(document.getElementById('wiz-message-limit').value, 10) || 2000);
       const batchVal = parseInt(document.getElementById('wiz-batch-size').value, 10) || 5;
       const destVal = document.getElementById('wiz-dest-dir').value || appState.environment.default_download_dir;
-      const appendSub = document.getElementById('wiz-append-subfolder').checked;
 
       document.getElementById('sum-chat').textContent = `${selectedChatTitle} (${selectedChatInput})`;
       document.getElementById('sum-media').textContent = labels.join(' + ');
       document.getElementById('sum-workers').textContent =
         `${batchVal} workers • Limite: ${limitVal ? limitVal + ' msgs' : 'Sem limite'}`;
       document.getElementById('sum-dest').textContent =
-        `${destVal}${appendSub ? (mediaTypes.length === 1 ? '/' + mediaTypes[0] : '/all') : ''}`;
+        `${destVal.replace(/\/$/, '')}/${channelFolderPreview(selectedChatTitle, selectedChatInput)}`;
 
       const q = appState.queue || {};
       const noticeBox = document.getElementById('wiz-queue-notice');
@@ -2056,7 +2059,6 @@
       const unlim = document.getElementById('wiz-unlimited-cb').checked;
       const limitVal = unlim ? 0 : (parseInt(document.getElementById('wiz-message-limit').value, 10) || 2000);
       const destVal = document.getElementById('wiz-dest-dir').value;
-      const appendSub = document.getElementById('wiz-append-subfolder').checked;
 
       btn.disabled = true;
       btn.textContent = 'Escaneando...';
@@ -2073,13 +2075,13 @@
             media_types: mediaTypes,
             message_limit: limitVal,
             dest_dir: destVal,
-            append_type_folder: appendSub
           })
         });
         const data = await res.json();
         if (!res.ok) {
           resBox.innerHTML = `<div class="text-rose-400">${escapeHtml(data.detail || 'Falha ao escanear canal.')}</div>`;
         } else {
+          document.getElementById('sum-dest').textContent = data.dest_dir;
           resBox.innerHTML = `
             <div class="grid grid-cols-3 gap-2 font-mono text-center">
               <div class="bg-bgSurface p-2 rounded border border-borderSubtle">
@@ -2111,7 +2113,6 @@
       const limitVal = unlim ? 0 : (parseInt(document.getElementById('wiz-message-limit').value, 10) || 2000);
       const batchVal = parseInt(document.getElementById('wiz-batch-size').value, 10) || 5;
       const destVal = document.getElementById('wiz-dest-dir').value;
-      const appendSub = document.getElementById('wiz-append-subfolder').checked;
 
       const btn = document.getElementById('btn-wiz-submit');
       btn.disabled = true;
@@ -2128,7 +2129,6 @@
             message_limit: limitVal,
             batch_size: batchVal,
             dest_dir: destVal,
-            append_type_folder: appendSub
           })
         });
         const data = await res.json();

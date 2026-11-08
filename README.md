@@ -374,7 +374,9 @@ Acesse `http://localhost:8000` (ou o IP do servidor no homelab). A interface ofe
 
 O volume nomeado `tbmd-data` preserva `/app/data/tbmd.db` e seus arquivos WAL entre recriações. Não execute `docker compose down -v` se quiser preservar sessão e fila. A CLI local usa outro banco por padrão; para compartilhar o banco do container, execute `docker compose exec tbmd-web python src/tbmd.py --list`. Mantenha o mesmo `TBMD_SESSION_KEY` entre reinícios.
 
-Os volumes mapeados no `docker-compose.yml` (`/downloads`, `/media`, `/mnt`) aparecem automaticamente nos atalhos do seletor de pastas.
+No passo 3, o único atalho recomendado é `DOWNLOAD_DIR` (`/downloads` no container), apontando para o volume persistente. Você pode navegar e escolher outra pasta base.
+
+O painel sempre cria uma subpasta com o nome real do canal em `snake_case`: por exemplo, “Curso de Python — Avançado” em `/downloads` resulta em `/downloads/curso_de_python_avancado`. Acentos, espaços, emojis e caracteres de caminho são normalizados; nomes sem letras ou números usam `canal_<id>`. Todos os tipos selecionados ficam juntos nessa pasta, sem subpastas por categoria. A prévia e o download usam o mesmo destino. Jobs já existentes mantêm os caminhos que tinham ao serem criados.
 
 ---
 

@@ -105,7 +105,6 @@ class PreviewRequest(BaseModel):
     media_types: list[str] | None = None
     message_limit: int | None = None
     dest_dir: str | None = None
-    append_type_folder: bool = True
 
 
 class StartDownloadRequest(BaseModel):
@@ -116,7 +115,6 @@ class StartDownloadRequest(BaseModel):
     message_limit: int | None = None
     batch_size: int | None = None
     dest_dir: str | None = None
-    append_type_folder: bool = True
 
 
 class QueuePauseRequest(BaseModel):

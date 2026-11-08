@@ -141,16 +141,13 @@ class TestWebEndpoints(unittest.TestCase):
             self.assertTrue(os.path.isdir(created_path))
             self.assertEqual(os.path.basename(created_path), "Meus Videos_2026")
 
-    def test_resolve_destination_with_and_without_subfolder(self):
-        p1 = web.manager.resolve_destination("/mnt/media", "videos", append_type_folder=True)
-        self.assertEqual(p1, os.path.abspath("/mnt/media/videos"))
-
-        # Does not duplicate `/videos/videos` if already ending with `/videos`
-        p2 = web.manager.resolve_destination("/mnt/media/videos", "videos", append_type_folder=True)
-        self.assertEqual(p2, os.path.abspath("/mnt/media/videos"))
-
-        p3 = web.manager.resolve_destination("/mnt/media", "videos", append_type_folder=False)
-        self.assertEqual(p3, os.path.abspath("/mnt/media"))
+    def test_resolve_destination_uses_channel_folder(self):
+        self.assertEqual(web.manager.resolve_destination("/mnt/media", "Aulas de Python!"),
+                         os.path.abspath("/mnt/media/aulas_de_python"))
+        self.assertEqual(web.manager.resolve_destination("/mnt/media/videos", "Aulas"),
+                         os.path.abspath("/mnt/media/videos/aulas"))
+        self.assertEqual(web.manager.resolve_destination(None, "Aulas"),
+                         os.path.abspath("downloads/aulas"))
 
     def test_clear_logs_endpoint(self):
         web.manager._add_log("info", "test.mp4", "Teste")
@@ -159,7 +156,10 @@ class TestWebEndpoints(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json()["job"]["recent_logs"], [])
 
-    def test_queue_operations_and_multi_media_types(self):
+    @patch("src.web.manager.resolve_channel", new_callable=AsyncMock)
+    def test_queue_operations_and_multi_media_types(self, resolve):
+        from telethon.tl.types import Channel
+        resolve.return_value = Channel(id=123, title="Canal de Teste", photo=None, date=None)
         with tempfile.TemporaryDirectory() as tmpdir:
             orig_jobs_file = web.JOBS_FILE
             web.JOBS_FILE = os.path.join(tmpdir, "jobs_history.json")
@@ -179,10 +179,17 @@ class TestWebEndpoints(unittest.TestCase):
                         "chat_title": "Canal Um",
                         "media_types": ["videos", "pdfs"],
                         "dest_dir": tmpdir,
-                        "append_type_folder": False,
                     },
                 )
                 self.assertEqual(r1.status_code, 200)
+                self.assertEqual(r1.json()["jobs"][0]["dest_dir"], os.path.join(tmpdir, "canal_de_teste"))
+                web.manager.client.get_messages = AsyncMock(return_value=[])
+                with patch("src.web.manager.load_state", return_value={}):
+                    preview = self.client.post("/api/downloads/preview", json={
+                        "chat": "@canal_um", "dest_dir": tmpdir, "media_types": ["videos", "pdfs"]})
+                self.assertEqual(preview.status_code, 200)
+                self.assertEqual(preview.json()["dest_dir"], r1.json()["jobs"][0]["dest_dir"])
+
 
                 r2 = self.client.post(
                     "/api/downloads/start",
@@ -191,7 +198,6 @@ class TestWebEndpoints(unittest.TestCase):
                         "chat_title": "Canal Dois",
                         "media_types": ["images"],
                         "dest_dir": tmpdir,
-                        "append_type_folder": True,
                     },
                 )
                 self.assertEqual(r2.status_code, 200)

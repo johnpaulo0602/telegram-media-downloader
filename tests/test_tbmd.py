@@ -365,3 +365,24 @@ class TestSQLiteIntegration(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class TestChannelFolders(unittest.TestCase):
+    def test_portable_folder_names(self):
+        from src.utils import channel_folder_name
+        cases = [
+            ('Curso de Python — Avançado 🚀', 'curso_de_python_avancado'),
+            ('../../Aulas / Vídeos\\PDFs', 'aulas_videos_pdfs'),
+            ('CON', 'canal_con'),
+            ('🔥', 'canal_123'),
+            ('a' * 200, 'a' * 100),
+        ]
+        for title, expected in cases:
+            with self.subTest(title=title):
+                self.assertEqual(channel_folder_name(title, '123'), expected)
+
+    def test_only_download_volume_is_recommended(self):
+        from src.utils import get_filesystem_shortcuts
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, 'future_downloads')
+            shortcuts = get_filesystem_shortcuts(target)
+            self.assertEqual([item['path'] for item in shortcuts], [target])
