@@ -1,15 +1,13 @@
 """
 Encrypted storage for the Telegram MTProto session.
 
-Telethon stores the 256-byte ``auth_key`` in cleartext (both ``SQLiteSession``
-and ``StringSession``), so a leaked database or backup would hand over a full
-account session. This module keeps the session inside the SQLite database
-encrypted with AES-256-GCM, using a key derived from a passphrase via scrypt.
+Telethon sessions remain in memory while the client runs. This module stores
+them only as AES-256-GCM ciphertext inside the application SQLite database,
+using a key derived from a passphrase via scrypt.
 
 The encryption key is read from ``TBMD_SESSION_KEY`` in the server environment
 and is never supplied by the web UI.
 """
-import os
 import secrets
 from typing import Any
 
@@ -17,7 +15,7 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 from telethon import TelegramClient
-from telethon.sessions import SQLiteSession, StringSession
+from telethon.sessions import StringSession
 
 from src.queue_db import QueueDatabase
 
@@ -119,27 +117,6 @@ def session_to_string(session: Any) -> str:
     return StringSession.save(session)
 
 
-def migrate_legacy_session(session_path: str) -> str | None:
-    """
-    Read a legacy ``*.session`` file and return its string representation.
-    Returns None when the file is missing or holds no authentication key.
-    """
-    session_path = os.fspath(session_path)
-    if not session_path.endswith(".session"):
-        session_path += ".session"
-    if not os.path.isfile(session_path):
-        return None
-    legacy = None
-    try:
-        legacy = SQLiteSession(session_path)
-        if not legacy.auth_key:
-            return None
-        return session_to_string(legacy)
-    finally:
-        if legacy is not None:
-            legacy.close()
-
-
 def open_client_from_store(config: dict[str, Any], db: QueueDatabase) -> TelegramClient | None:
     """
     Build a TelegramClient from the encrypted session in the database.
@@ -148,11 +125,7 @@ def open_client_from_store(config: dict[str, Any], db: QueueDatabase) -> Telegra
     """
     store = SessionStore(db)
     if not store.has_session():
-        legacy = migrate_legacy_session(config.get("session_name", "default_session"))
-        if legacy:
-            store.save(legacy, config["session_key"])
-        else:
-            return None
+        return None
 
     session_string = store.load(config["session_key"])
     return TelegramClient(StringSession(session_string), config["api_id"], config["api_hash"])

@@ -8,7 +8,6 @@ class Settings:
     api_id: int | None
     api_hash: str
     session_key: str
-    session_name: str = "default_session"
     download_dir: str = "downloads"
     batch_size: int = 5
     message_limit: int | None = 2000
@@ -21,7 +20,6 @@ class Settings:
         return {
             "api_id": self.api_id,
             "api_hash": self.api_hash,
-            "session_name": self.session_name,
             "download_dir": self.download_dir,
             "batch_size": self.batch_size,
             "message_limit": self.message_limit,
@@ -46,7 +44,6 @@ def load_settings(env_file: str | None = None, load_env: bool = True) -> tuple[S
 
     api_id_raw = os.getenv("API_ID")
     api_hash = os.getenv("API_HASH")
-    session_name = os.getenv("SESSION_NAME", "default_session").strip() or "default_session"
     download_dir = os.getenv("DOWNLOAD_DIR", "downloads").strip() or "downloads"
     batch_size_raw = os.getenv("BATCH_SIZE", "5")
     limit_raw = os.getenv("MESSAGE_LIMIT", "2000")
@@ -91,7 +88,6 @@ def load_settings(env_file: str | None = None, load_env: bool = True) -> tuple[S
     settings = Settings(
         api_id=api_id,
         api_hash=api_hash.strip(),
-        session_name=session_name,
         download_dir=download_dir,
         batch_size=batch_size,
         message_limit=message_limit,

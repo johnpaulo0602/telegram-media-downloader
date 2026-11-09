@@ -24,7 +24,6 @@ class TestAuthServiceState(unittest.TestCase):
         self.config = {
             "api_id": 12345,
             "api_hash": "dummy_hash",
-            "session_name": "test_session",
             "session_key": None,
         }
         self.service = TelegramAuthService(lambda: self.config, lambda: self.db)
@@ -63,7 +62,6 @@ class TestAuthEndpoints(unittest.TestCase):
         web.manager.config = {
             "api_id": 12345,
             "api_hash": "dummy_hash",
-            "session_name": "test_session",
             "download_dir": "downloads",
             "batch_size": 5,
             "message_limit": 2000,
@@ -165,7 +163,6 @@ class TestAccessTokenGuard(unittest.TestCase):
         web.manager.config = {
             "api_id": 12345,
             "api_hash": "dummy_hash",
-            "session_name": "test_session",
             "download_dir": "downloads",
             "batch_size": 5,
             "message_limit": 2000,
@@ -290,7 +287,7 @@ class TestCLIPersistence(unittest.IsolatedAsyncioTestCase):
         settings.to_dict.return_value = {'session_key': 'test-key'}
         with patch.object(cli, 'build_parser') as parser, \
              patch.object(cli, 'load_settings', return_value=(settings, None)), \
-             patch.object(cli, 'get_queue_db'), patch.object(cli, 'load_state'), \
+             patch.object(cli, 'get_queue_db'), \
              patch.object(cli, 'open_client_from_store', return_value=client), \
              patch.object(cli, 'save_client_session') as save, \
              patch.object(cli, 'fetch_dialogs', new=AsyncMock(return_value=[])):
@@ -309,3 +306,14 @@ class TestQRCompletion(unittest.IsolatedAsyncioTestCase):
         qr.wait = AsyncMock()
         await service._await_qr(qr)
         service._finalize.assert_awaited_once_with(client)
+
+class TestSQLiteOnlyRestore(unittest.IsolatedAsyncioTestCase):
+    async def test_empty_database_requests_login_without_reading_session_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = QueueDatabase(os.path.join(tmp, 'auth.db'))
+            service = TelegramAuthService(lambda: {'session_key': 'test-key'}, lambda: db)
+            with patch('builtins.open', side_effect=AssertionError('Unexpected file read')):
+                await service.restore()
+            self.assertEqual(service.status, 'unauthenticated')
+            self.assertIsNone(service.client)
+            self.assertFalse(service.store.has_session())

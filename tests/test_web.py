@@ -49,48 +49,42 @@ class TestFilesystemBrowser(unittest.TestCase):
 class TestDownloadSessionEvents(unittest.TestCase):
     def test_download_file_emits_events(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            state_file = os.path.join(tmpdir, "state.json")
-            orig_state_file = downloader.STATE_FILE
-            downloader.STATE_FILE = state_file
-            try:
-                events = []
+            events = []
 
-                def on_event(event_type, payload):
-                    events.append((event_type, payload))
+            def on_event(event_type, payload):
+                events.append((event_type, payload))
 
-                session = DownloadSession(
-                    dest_dir=tmpdir,
-                    chat_key="chan_1",
-                    state={},
-                    batch_size=2,
-                    event_callback=on_event,
-                )
+            session = DownloadSession(
+                dest_dir=tmpdir,
+                chat_key="chan_1",
+                batch_size=2,
+                event_callback=on_event,
+                db=QueueDatabase(os.path.join(tmpdir, "events.db")),
+            )
 
-                msg = MagicMock()
-                msg.id = 101
-                msg.text = "Aula 01"
-                msg.file.ext = ".mp4"
-                msg.file.name = "aula01.mp4"
-                msg.file.size = 1024
+            msg = MagicMock()
+            msg.id = 101
+            msg.text = "Aula 01"
+            msg.file.ext = ".mp4"
+            msg.file.name = "aula01.mp4"
+            msg.file.size = 1024
 
-                async def fake_download(file, progress_callback=None):
-                    if progress_callback:
-                        progress_callback(512, 1024)
-                        progress_callback(1024, 1024)
-                    with open(file, "wb") as f:
-                        f.write(b"x" * 1024)
+            async def fake_download(file, progress_callback=None):
+                if progress_callback:
+                    progress_callback(512, 1024)
+                    progress_callback(1024, 1024)
+                with open(file, "wb") as f:
+                    f.write(b"x" * 1024)
 
-                msg.download_media = AsyncMock(side_effect=fake_download)
+            msg.download_media = AsyncMock(side_effect=fake_download)
 
-                asyncio.run(download_file(msg, session))
+            asyncio.run(download_file(msg, session))
 
-                self.assertEqual(session.downloaded, 1)
-                event_types = [e[0] for e in events]
-                self.assertIn("file_start", event_types)
-                self.assertIn("file_progress", event_types)
-                self.assertIn("file_complete", event_types)
-            finally:
-                downloader.STATE_FILE = orig_state_file
+            self.assertEqual(session.downloaded, 1)
+            event_types = [e[0] for e in events]
+            self.assertIn("file_start", event_types)
+            self.assertIn("file_progress", event_types)
+            self.assertIn("file_complete", event_types)
 
 
 class TestWebEndpoints(unittest.TestCase):
@@ -109,7 +103,6 @@ class TestWebEndpoints(unittest.TestCase):
         web.manager.config = {
             "api_id": 12345,
             "api_hash": "dummy_hash",
-            "session_name": "test_session",
             "download_dir": "downloads",
             "batch_size": 5,
             "message_limit": 2000,
@@ -194,9 +187,8 @@ class TestWebEndpoints(unittest.TestCase):
                 self.assertEqual(r1.status_code, 200)
                 self.assertEqual(r1.json()["jobs"][0]["dest_dir"], os.path.join(tmpdir, "canal_de_teste"))
                 web.manager.client.get_messages = AsyncMock(return_value=[])
-                with patch("src.web.manager.load_state", return_value={}):
-                    preview = self.client.post("/api/downloads/preview", json={
-                        "chat": "@canal_um", "dest_dir": tmpdir, "media_types": ["videos", "pdfs"]})
+                preview = self.client.post("/api/downloads/preview", json={
+                    "chat": "@canal_um", "dest_dir": tmpdir, "media_types": ["videos", "pdfs"]})
                 self.assertEqual(preview.status_code, 200)
                 self.assertEqual(preview.json()["dest_dir"], r1.json()["jobs"][0]["dest_dir"])
 

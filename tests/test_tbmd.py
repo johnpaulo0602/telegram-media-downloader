@@ -13,9 +13,6 @@ from src.downloader import (
     download_file,
     download_media_list,
     is_already_downloaded,
-    load_state,
-    record_download,
-    save_state,
 )
 from src.queue_db import QueueDatabase
 from src.settings import load_settings
@@ -79,46 +76,30 @@ class TestChatInputParsing(unittest.TestCase):
 
 
 class TestStateManagement(unittest.TestCase):
-    def test_state_load_and_save(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            state_file = os.path.join(tmpdir, "state.json")
-            orig_file = downloader.STATE_FILE
-            downloader.STATE_FILE = state_file
-            try:
-                state = load_state()
-                self.assertEqual(state, {})
+    def test_sqlite_history_survives_reopening_database(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, 'queue.db')
+            media = os.path.join(tmp, 'test.mp4')
+            with open(media, 'wb') as stream:
+                stream.write(b'media')
+            db = QueueDatabase(path)
+            item, _ = db.enqueue_item('channel', 1, 'test.mp4', media)
+            db.mark_completed(item, media, 5)
+            reopened = QueueDatabase(path)
+            self.assertTrue(is_already_downloaded('channel', 1, os.path.join(tmp, 'other.mp4'), db=reopened))
+            os.unlink(media)
+            self.assertFalse(is_already_downloaded('channel', 1, media, db=reopened))
 
-                record_download(state, "my_channel", 123, "/path/to/file.mp4")
-                save_state(state)
-
-                loaded = load_state()
-                self.assertIn("my_channel", loaded)
-                self.assertIn("123", loaded["my_channel"])
-                self.assertEqual(loaded["my_channel"]["123"]["path"], "/path/to/file.mp4")
-            finally:
-                downloader.STATE_FILE = orig_file
-
-    def test_is_already_downloaded(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            existing_file = os.path.join(tmpdir, "test.mp4")
-            with open(existing_file, "w") as f:
-                f.write("dummy content")
-
-            state = {
-                "chan1": {
-                    "10": {"path": existing_file, "size": 13}
-                }
-            }
-
-            # In state and file exists
-            self.assertTrue(is_already_downloaded(state, "chan1", 10, existing_file))
-
-            # Not in state, but destination path exists and has content
-            self.assertTrue(is_already_downloaded(state, "chan1", 99, existing_file))
-
-            # Neither in state nor existing on disk
-            non_existent = os.path.join(tmpdir, "none.mp4")
-            self.assertFalse(is_already_downloaded(state, "chan1", 99, non_existent))
+    def test_existing_destination_without_history_is_detected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = QueueDatabase(os.path.join(tmp, 'queue.db'))
+            media = os.path.join(tmp, 'test.mp4')
+            with open(media, 'wb') as stream:
+                stream.write(b'media')
+            self.assertTrue(is_already_downloaded('channel', 1, media, db=db))
+            with open(media, 'wb'):
+                pass
+            self.assertFalse(is_already_downloaded('channel', 1, media, db=db))
 
 
 class TestMediaNaming(unittest.TestCase):
@@ -164,7 +145,6 @@ class TestConfigLoading(unittest.TestCase):
         self.assertEqual(config["api_id"], 123456)
         self.assertEqual(config["api_hash"], "secret_hash")
         self.assertEqual(config["batch_size"], 10)
-        self.assertEqual(config["session_name"], "default_session")
         self.assertEqual(config["download_dir"], "downloads")
 
     @patch.dict(os.environ, {"API_ID": "1", "API_HASH": "h", "DOWNLOAD_DIR": "/tmp/tg", "TBMD_SESSION_KEY": "k"}, clear=True)
@@ -269,98 +249,89 @@ class TestCliArgs(unittest.TestCase):
 class TestSQLiteIntegration(unittest.TestCase):
     def test_download_session_integrates_with_sqlite(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            orig_state = downloader.STATE_FILE
-            downloader.STATE_FILE = os.path.join(tmpdir, "state.json")
-            try:
-                db_path = os.path.join(tmpdir, "test.db")
-                db = QueueDatabase(db_path)
-                session = DownloadSession(
-                    dest_dir=tmpdir,
-                    chat_key="test_chat",
-                    state={},
-                    batch_size=2,
-                    db=db,
-                )
+            db_path = os.path.join(tmpdir, "test.db")
+            db = QueueDatabase(db_path)
+            session = DownloadSession(
+                dest_dir=tmpdir,
+                chat_key="test_chat",
+                batch_size=2,
+                db=db,
+            )
 
-                msg = MagicMock()
-                msg.id = 555
-                msg.text = "Video Aula"
-                msg.file.ext = ".mp4"
-                msg.file.name = "aula.mp4"
-                msg.file.size = 2048
+            msg = MagicMock()
+            msg.id = 555
+            msg.text = "Video Aula"
+            msg.file.ext = ".mp4"
+            msg.file.name = "aula.mp4"
+            msg.file.size = 2048
 
-                async def fake_download(file, progress_callback=None):
-                    with open(file, "wb") as f:
-                        f.write(b"y" * 2048)
+            async def fake_download(file, progress_callback=None):
+                with open(file, "wb") as f:
+                    f.write(b"y" * 2048)
 
-                msg.download_media = AsyncMock(side_effect=fake_download)
+            msg.download_media = AsyncMock(side_effect=fake_download)
 
+            with patch("builtins.open", wraps=open) as file_io:
                 asyncio.run(download_file(msg, session))
+            self.assertFalse(any(os.path.basename(os.fspath(call.args[0])) == "download_state.json"
+                                 for call in file_io.call_args_list))
 
-                self.assertEqual(session.downloaded, 1)
-                item = db.get_item("test_chat", 555)
-                self.assertIsNotNone(item)
-                self.assertEqual(item["status"], "completed")
-                self.assertEqual(item["file_size"], 2048)
-                self.assertTrue(os.path.exists(item["dest_path"]))
+            self.assertEqual(session.downloaded, 1)
+            self.assertFalse(os.path.exists(os.path.join(tmpdir, "download_state.json")))
+            item = db.get_item("test_chat", 555)
+            self.assertIsNotNone(item)
+            self.assertEqual(item["status"], "completed")
+            self.assertEqual(item["file_size"], 2048)
+            self.assertTrue(os.path.exists(item["dest_path"]))
 
-                # Running again should skip it
-                session2 = DownloadSession(
-                    dest_dir=tmpdir,
-                    chat_key="test_chat",
-                    state={},
-                    batch_size=2,
-                    db=db,
-                )
-                asyncio.run(download_file(msg, session2))
-                self.assertEqual(session2.skipped, 1)
-            finally:
-                downloader.STATE_FILE = orig_state
+            # Running again should skip it
+            session2 = DownloadSession(
+                dest_dir=tmpdir,
+                chat_key="test_chat",
+                batch_size=2,
+                db=db,
+            )
+            asyncio.run(download_file(msg, session2))
+            self.assertEqual(session2.skipped, 1)
 
     def test_download_media_list_pre_enqueues_in_sqlite(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            orig_state = downloader.STATE_FILE
-            downloader.STATE_FILE = os.path.join(tmpdir, "state.json")
-            try:
-                db_path = os.path.join(tmpdir, "test.db")
-                db = QueueDatabase(db_path)
-                session = DownloadSession(
-                    dest_dir=tmpdir,
-                    chat_key="chan_batch",
-                    state={},
-                    batch_size=2,
-                    db=db,
-                )
+            db_path = os.path.join(tmpdir, "test.db")
+            db = QueueDatabase(db_path)
+            session = DownloadSession(
+                dest_dir=tmpdir,
+                chat_key="chan_batch",
+                batch_size=2,
+                db=db,
+            )
 
-                msg1 = MagicMock()
-                msg1.id = 1
-                msg1.text = "File 1"
-                msg1.file.ext = ".mp4"
-                msg1.file.name = "f1.mp4"
-                msg1.file.size = 100
+            msg1 = MagicMock()
+            msg1.id = 1
+            msg1.text = "File 1"
+            msg1.file.ext = ".mp4"
+            msg1.file.name = "f1.mp4"
+            msg1.file.size = 100
 
-                msg2 = MagicMock()
-                msg2.id = 2
-                msg2.text = "File 2"
-                msg2.file.ext = ".mp4"
-                msg2.file.name = "f2.mp4"
-                msg2.file.size = 200
+            msg2 = MagicMock()
+            msg2.id = 2
+            msg2.text = "File 2"
+            msg2.file.ext = ".mp4"
+            msg2.file.name = "f2.mp4"
+            msg2.file.size = 200
 
-                async def fake_dl(file, progress_callback=None):
-                    with open(file, "wb") as f:
-                        f.write(b"z" * 100)
+            async def fake_dl(file, progress_callback=None):
+                with open(file, "wb") as f:
+                    f.write(b"z" * 100)
 
-                msg1.download_media = AsyncMock(side_effect=fake_dl)
-                msg2.download_media = AsyncMock(side_effect=fake_dl)
+            msg1.download_media = AsyncMock(side_effect=fake_dl)
+            msg2.download_media = AsyncMock(side_effect=fake_dl)
 
-                with patch.object(console, "print"):
-                    asyncio.run(download_media_list([msg1, msg2], session))
+            with patch.object(console, "print"):
+                asyncio.run(download_media_list([msg1, msg2], session))
 
-                stats = db.get_stats("chan_batch")
-                self.assertEqual(stats["completed"], 2)
-                self.assertEqual(stats["total"], 2)
-            finally:
-                downloader.STATE_FILE = orig_state
+            stats = db.get_stats("chan_batch")
+            self.assertEqual(stats["completed"], 2)
+            self.assertEqual(stats["total"], 2)
 
 
 if __name__ == "__main__":
@@ -394,7 +365,8 @@ class TestQueueStateDatabase(unittest.TestCase):
             media = os.path.join(tmp, 'video.mp4')
             with open(media, 'wb') as stream:
                 stream.write(b'media')
-            record_download({}, 'channel', 1, media, db=db)
+            item, _ = db.enqueue_item('channel', 1, 'video.mp4', media)
+            db.mark_completed(item, media, 5)
             db.save_web_queue([{'id': 'TK-1001', 'status': 'completed'}], 1001, True)
-            self.assertIn('1', db.export_to_state_dict()['channel'])
+            self.assertEqual(db.get_item('channel', 1)['status'], 'completed')
             self.assertEqual(db.load_web_queue()['jobs'][0]['status'], 'completed')

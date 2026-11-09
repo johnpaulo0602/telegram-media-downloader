@@ -27,6 +27,8 @@ class TestSettings(unittest.TestCase):
         d = settings.to_dict()
         self.assertEqual(d["api_id"], 999888)
         self.assertEqual(d["web_port"], 8000)
+        self.assertNotIn("session_name", d)
+        self.assertFalse(hasattr(settings, "session_name"))
 
     @patch.dict(os.environ, {"API_ID": "", "API_HASH": "hash"}, clear=True)
     def test_load_settings_missing_api_id(self):

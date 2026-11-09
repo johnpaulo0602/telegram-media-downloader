@@ -67,7 +67,7 @@ telegram-media-downloader/
 
 ### `src/settings.py`
 Provides typed application configuration:
-- **`Settings`**: Strongly-typed dataclass containing `api_id`, `api_hash`, `session_name`, `download_dir`, `batch_size`, `message_limit`, `db_path`, `web_host`, and `web_port`.
+- **`Settings`**: Strongly-typed dataclass containing `api_id`, `api_hash`, `download_dir`, `batch_size`, `message_limit`, `db_path`, `web_host`, and `web_port`.
 - **`load_settings()`**: Reads `.env` and validates credentials with helpful error messages.
 
 ### `src/models.py`
@@ -86,7 +86,7 @@ Stateless utility functions:
 
 ### `src/queue_db.py`
 Manages the persistent SQLite database (`tbmd.db`) in WAL mode:
-- **`QueueDatabase`**: Schema creation, bulk item pre-enqueueing (`enqueue_batch`), status transitions, attempt tracking with retries (`max_attempts`), manual batch retries (`retry_failed`), and legacy media JSON migration (`import_from_json`). `web_jobs` and `web_queue_state` persist the complete web queue through `load_web_queue()` / `save_web_queue()`; `import_web_queue_from_json()` is an atomic, one-time legacy import.
+- **`QueueDatabase`**: Schema creation, bulk item pre-enqueueing (`enqueue_batch`), status transitions, attempt tracking with retries (`max_attempts`), manual batch retries (`retry_failed`). `web_jobs` and `web_queue_state` persist the complete web queue through `load_web_queue()` / `save_web_queue()`; `import_web_queue_from_json()` is an atomic, one-time legacy import.
 
 ### `src/downloader.py`
 The core Telegram downloader:
@@ -107,7 +107,7 @@ Encrypted Telegram session storage:
 - **`SessionStore`**: Reads and writes the session in the `telegram_session` table, encrypted with AES-256-GCM (key derived via scrypt).
 - **`derive_key()` / `encrypt()` / `decrypt()`**: Pure crypto primitives; a wrong passphrase raises `SessionKeyError` through the GCM authentication tag.
 - **`TBMD_SESSION_KEY`**: Mandatory server-side environment variable; never accept the encryption key from an API request or web form.
-- New authentication uses in-memory Telethon sessions and persists only encrypted session data in SQLite. Compatibility helpers for older installations are not part of the normal setup.
+- New authentication uses in-memory Telethon sessions and persists only encrypted session data in SQLite. Do not import standalone authentication files or create a JSON media-state file; the SQLite tables are authoritative.
 
 ### `src/web/`
 FastAPI web application and homelab dashboard:

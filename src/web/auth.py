@@ -12,7 +12,6 @@ client is only replaced once a session has been successfully obtained.
 import asyncio
 import base64
 import io
-import os
 import time
 from typing import Any, Callable, Awaitable
 
@@ -29,11 +28,8 @@ from telethon.sessions import StringSession
 from src.session_store import (
     SessionKeyError,
     SessionStore,
-    migrate_legacy_session,
     session_to_string,
 )
-
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 AUTH_UNAUTHENTICATED = "unauthenticated"
 AUTH_LOCKED = "locked"
@@ -92,8 +88,7 @@ class TelegramAuthService:
 
     async def restore(self) -> None:
         """
-        Reconnect using the stored session. Falls back to the legacy
-        ``*.session`` file when the database has no session yet.
+        Reconnect using the encrypted session stored in SQLite, or request login.
         """
         config = self._config()
         self.store = SessionStore(self._db_provider())
@@ -110,14 +105,6 @@ class TelegramAuthService:
                 )
                 return
             await self._connect(session_string)
-            return
-
-        legacy = migrate_legacy_session(
-            os.path.join(PROJECT_ROOT, config.get("session_name", "default_session"))
-        )
-        if legacy:
-            self.store.save(legacy, self.passphrase)
-            await self._connect(legacy)
             return
 
         self.status = AUTH_UNAUTHENTICATED

@@ -1,5 +1,4 @@
 import asyncio
-import json
 import os
 from typing import Any
 
@@ -24,7 +23,6 @@ from src.queue_db import DEFAULT_DB_FILE, QueueDatabase
 from src.utils import get_media_filename, parse_chat_input, shorten
 
 console = Console()
-STATE_FILE = "download_state.json"
 _queue_db: QueueDatabase | None = None
 
 
@@ -48,83 +46,10 @@ def set_queue_db(db: QueueDatabase | None):
     _queue_db = db
 
 
-def load_state(db: QueueDatabase | None = None) -> dict:
-    """Load download history from STATE_FILE, importing to SQLite if available."""
-    state = {}
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE, "r", encoding="utf-8") as f:
-                state = json.load(f)
-        except Exception:
-            state = {}
-
-    target_db = db or _queue_db
-    if target_db is not None and os.path.exists(STATE_FILE):
-        try:
-            target_db.import_from_json(STATE_FILE)
-        except Exception:
-            pass
-
-    return state
-
-
-def save_state(state: dict):
-    """Save download history to STATE_FILE."""
-    try:
-        with open(STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump(state, f, indent=2, ensure_ascii=False)
-    except Exception as e:
-        console.print(f"[yellow]Aviso: não foi possível salvar o estado: {escape(str(e))}[/]")
-
-
-def record_download(state: dict, chat_key: str, message_id: int, file_path: str, db: QueueDatabase | None = None):
-    """Record completed download in state dictionary and in SQLite."""
-    chat_str = str(chat_key)
-    if chat_str not in state:
-        state[chat_str] = {}
-    file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
-    state[chat_str][str(message_id)] = {
-        "path": file_path,
-        "size": file_size,
-    }
-
-    target_db = db or _queue_db
-    if target_db is not None:
-        try:
-            existing = target_db.get_item(chat_str, message_id)
-            if existing:
-                target_db.mark_completed(existing["id"], file_path, file_size)
-            else:
-                item_id, _ = target_db.enqueue_item(
-                    chat_id=chat_str,
-                    message_id=message_id,
-                    file_name=os.path.basename(file_path),
-                    dest_path=file_path,
-                    file_size=file_size,
-                )
-                target_db.mark_completed(item_id, file_path, file_size)
-        except Exception:
-            pass
-
-
-def is_already_downloaded(state: dict, chat_key: str, message_id: int, dest_path: str, db: QueueDatabase | None = None) -> bool:
-    """Check if message media was already downloaded and file exists."""
-    chat_records = state.get(str(chat_key), {}) if state else {}
-    if str(message_id) in chat_records:
-        rec_path = chat_records[str(message_id)].get("path")
-        if rec_path and os.path.exists(rec_path) and os.path.getsize(rec_path) > 0:
-            return True
-
-    # Check SQLite DB
-    target_db = db or _queue_db
-    if target_db is not None and target_db.is_downloaded(chat_key, message_id, dest_path):
-        return True
-
-    # Check directly if target file exists and is not empty
-    if os.path.exists(dest_path) and os.path.getsize(dest_path) > 0:
-        return True
-
-    return False
+def is_already_downloaded(chat_key: str, message_id: int, dest_path: str, db: QueueDatabase | None = None) -> bool:
+    """Check the SQLite history and destination file for an existing download."""
+    target_db = db if db is not None else get_queue_db()
+    return target_db.is_downloaded(chat_key, message_id, dest_path)
 
 
 class DownloadSession:
@@ -134,14 +59,12 @@ class DownloadSession:
         self,
         dest_dir: str,
         chat_key: str,
-        state: dict,
         batch_size: int,
         event_callback=None,
         db: QueueDatabase | None = None,
     ):
         self.dest_dir = dest_dir
         self.chat_key = str(chat_key)
-        self.state = state
         self.batch_size = batch_size
         self.semaphore = asyncio.Semaphore(batch_size)
         self.downloaded = 0
@@ -195,7 +118,7 @@ async def download_file(
                 )
 
         # Check for resuming / skipping
-        if is_already_downloaded(session.state, session.chat_key, message.id, dest_path, db=session.db):
+        if is_already_downloaded(session.chat_key, message.id, dest_path, db=session.db):
             session.skipped += 1
             if session.db is not None and item_id:
                 session.db.mark_skipped(item_id, "Already exists on disk")
@@ -257,12 +180,10 @@ async def download_file(
                 # Retry once after FloodWait
                 await message.download_media(file=dest_path, progress_callback=on_progress)
 
-            record_download(session.state, session.chat_key, message.id, dest_path, db=session.db)
-            save_state(session.state)
-            session.downloaded += 1
             final_size = os.path.getsize(dest_path) if os.path.exists(dest_path) else (file_size or 0)
             if session.db is not None and item_id:
                 session.db.mark_completed(item_id, dest_path, final_size)
+            session.downloaded += 1
 
             session.emit(
                 "file_complete",

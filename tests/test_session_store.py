@@ -9,7 +9,6 @@ from src.session_store import (
     decrypt,
     derive_key,
     encrypt,
-    migrate_legacy_session,
     session_to_string,
 )
 
@@ -95,37 +94,39 @@ class TestSessionStore(unittest.TestCase):
         self.assertNotIn(b"1sessionstring", row["ciphertext"])
 
 
-class TestLegacyMigration(unittest.TestCase):
-    def test_missing_file_returns_none(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            self.assertIsNone(migrate_legacy_session(os.path.join(tmpdir, "inexistente.session")))
+class TestStoredClient(unittest.TestCase):
+    def test_missing_encrypted_session_requires_login_without_opening_files(self):
+        from unittest.mock import patch
+        from src.session_store import open_client_from_store
+        with tempfile.TemporaryDirectory() as tmp:
+            db = QueueDatabase(os.path.join(tmp, 'test.db'))
+            with patch('builtins.open', side_effect=AssertionError('Unexpected file read')):
+                self.assertIsNone(open_client_from_store({'session_key': 'test-key'}, db))
+            self.assertFalse(SessionStore(db).has_session())
 
-    def test_file_without_auth_key_returns_none(self):
-        from telethon.sessions import SQLiteSession
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = os.path.join(tmpdir, "vazio.session")
-            SQLiteSession(path)
-            self.assertIsNone(migrate_legacy_session(path))
-
-
-if __name__ == "__main__":
-    unittest.main()
-
-class TestLegacyImport(unittest.TestCase):
-    def test_extensionless_path_imports_into_encrypted_store(self):
-        from telethon.sessions import SQLiteSession
+    def test_existing_encrypted_session_builds_in_memory_client(self):
+        from unittest.mock import patch
+        from telethon.sessions import StringSession
         from telethon.crypto import AuthKey
         from src.session_store import open_client_from_store
         with tempfile.TemporaryDirectory() as tmp:
-            path = os.path.join(tmp, 'legacy')
-            legacy = SQLiteSession(path)
-            legacy.set_dc(2, '149.154.167.51', 443)
-            legacy.auth_key = AuthKey(bytes(range(256)))
-            expected = session_to_string(legacy)
-            legacy.close()
+            path = os.path.join(tmp, 'test.db')
+            session = StringSession()
+            session.set_dc(2, '149.154.167.51', 443)
+            session.auth_key = AuthKey(bytes(range(256)))
+            encoded = session.save()
+            SessionStore(QueueDatabase(path)).save(encoded, 'test-key')
+            with patch('src.session_store.TelegramClient') as factory:
+                open_client_from_store({'session_key': 'test-key', 'api_id': 123, 'api_hash': 'dummy'},
+                                       QueueDatabase(path))
+            restored = factory.call_args.args[0]
+            self.assertIsInstance(restored, StringSession)
+            self.assertEqual(restored.save(), encoded)
+
+    def test_wrong_key_does_not_fall_back_to_another_session(self):
+        from src.session_store import open_client_from_store
+        with tempfile.TemporaryDirectory() as tmp:
             db = QueueDatabase(os.path.join(tmp, 'test.db'))
-            client = open_client_from_store({'session_name': path, 'session_key': 'test-key',
-                                             'api_id': 12345, 'api_hash': 'dummy_hash'}, db)
-            self.assertIsNotNone(client)
-            self.assertEqual(SessionStore(db).load('test-key'), expected)
+            SessionStore(db).save('opaque-test-data', 'test-key')
+            with self.assertRaises(SessionKeyError):
+                open_client_from_store({'session_key': 'wrong-key'}, db)

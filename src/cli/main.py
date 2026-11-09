@@ -29,7 +29,6 @@ from src.downloader import (
     download_media_list,
     fetch_dialogs,
     get_queue_db,
-    load_state,
     resolve_or_report,
 )
 from src.settings import load_settings
@@ -92,8 +91,6 @@ async def main():
         console.print(f"[green]✓[/] {retried} mídias resetadas para status 'pending' na fila do SQLite.")
         if not args.chat:
             return
-
-    state = load_state(db=db)
 
     try:
         client = open_client_from_store(config, db)
@@ -170,7 +167,7 @@ async def main():
                 return
 
         os.makedirs(dest_dir, exist_ok=True)
-        session = DownloadSession(dest_dir, str(chat_id), state, config["batch_size"], db=db)
+        session = DownloadSession(dest_dir, str(chat_id), config["batch_size"], db=db)
         await download_media_list(media_messages, session)
         print_results(session)
 

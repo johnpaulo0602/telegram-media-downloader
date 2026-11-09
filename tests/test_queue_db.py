@@ -163,24 +163,3 @@ class TestQueueDatabase(unittest.TestCase):
 
         # Neither
         self.assertFalse(self.db.is_downloaded("c1", 999, "/non/existent.mp4"))
-
-    def test_import_from_json_and_export(self):
-        json_file = os.path.join(self.temp_dir.name, "legacy_state.json")
-        import json
-
-        data = {
-            "chan_legacy": {
-                "50": {"path": "/downloads/legacy1.mp4", "size": 1234},
-                "51": {"path": "/downloads/legacy2.mp4", "size": 5678},
-            }
-        }
-        with open(json_file, "w") as f:
-            json.dump(data, f)
-
-        imported = self.db.import_from_json(json_file)
-        self.assertEqual(imported, 2)
-
-        exported = self.db.export_to_state_dict("chan_legacy")
-        self.assertIn("50", exported["chan_legacy"])
-        self.assertEqual(exported["chan_legacy"]["50"]["path"], "/downloads/legacy1.mp4")
-        self.assertEqual(exported["chan_legacy"]["50"]["size"], 1234)

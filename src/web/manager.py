@@ -12,7 +12,6 @@ from src.downloader import (
     download_file,
     get_queue_db,
     is_already_downloaded,
-    load_state,
     resolve_channel,
 )
 from src.models import (
@@ -315,7 +314,6 @@ class WebDownloadManager:
                 "authorized": self.authorized,
                 "user": self.user_info,
                 "error": self.config_error,
-                "session_name": (self.config or {}).get("session_name", "default_session"),
                 "auth": self.auth.state(),
             },
             "environment": {
@@ -552,7 +550,6 @@ class WebDownloadManager:
             limit=limit,
         )
         media_messages = filter_media_messages(messages, media_types)
-        state = load_state()
         chat_id = str(getattr(channel, "id", req.chat))
         chat_title = utils.get_display_name(channel) or str(req.chat)
         dest_dir = self.resolve_destination(req.dest_dir, chat_title, chat_id)
@@ -566,7 +563,7 @@ class WebDownloadManager:
             dest_path = os.path.join(dest_dir, fname)
             fsize = msg.file.size if msg.file and msg.file.size else 0
             total_bytes += fsize
-            already = is_already_downloaded(state, chat_id, msg.id, dest_path)
+            already = is_already_downloaded(chat_id, msg.id, dest_path, db=self.get_db())
             if already:
                 already_count += 1
             if len(samples) < 8:
@@ -783,8 +780,7 @@ class WebDownloadManager:
                 return
 
             os.makedirs(dest_dir, exist_ok=True)
-            state = load_state()
-            db = get_queue_db((self.config or {}).get("db_path"))
+            db = self.get_db()
 
             # Pre-enqueue all messages into the persistent SQLite database
             if media_messages and db:
@@ -811,7 +807,6 @@ class WebDownloadManager:
             self.active_Session = DownloadSession(
                 dest_dir=dest_dir,
                 chat_key=chat_id,
-                state=state,
                 batch_size=batch_size,
                 event_callback=self._on_download_event,
                 db=db,
