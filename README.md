@@ -71,10 +71,10 @@ python src/tbmd.py --web    # painel web em http://localhost:8000
 
 | | |
 |---|---|
-| **Login pela própria sessão do Telegram** | QR Code ou telefone (com 2FA) direto no painel. A sessão fica **criptografada** no SQLite (AES-256-GCM) — sem arquivo `.session` solto em disco. |
+| **Login pela própria sessão do Telegram** | QR Code ou telefone (com 2FA) direto no painel. A sessão é salva **criptografada** na tabela `telegram_session` do SQLite (AES-256-GCM). |
 | **Downloads simultâneos** | Paralelismo controlado por `asyncio.Semaphore`, aproveitando a banda sem estourar o limite da API. |
-| **Fila persistente em SQLite** | Cada mídia é registrada em `tbmd.db` (modo WAL) com status, tentativas e destino; a fila sobrevive a reinícios. |
-| **Retomada automática** | Itens já baixados são reconhecidos e ignorados, tanto pelo `download_state.json` legado quanto pelo SQLite. |
+| **Fila persistente em SQLite** | Jobs, ordem da fila, pausa e histórico ficam no SQLite, junto dos status, tentativas e destinos de cada mídia. |
+| **Retomada automática** | Arquivos já baixados são reconhecidos pelo histórico de mídias no SQLite e pela presença no destino. |
 | **Resolução flexível de chat** | Aceita `@usuario`, `https://t.me/usuario`, IDs numéricos e IDs completos de canal (`-100...`). |
 | **Busca sem acento** | `musica` encontra "Música"; também casa por username, link ou ID. |
 | **Renomeação inteligente** | Usa a legenda, o nome original ou a extensão do MIME; sanitiza, trunca e prefixa o ID da mensagem para evitar colisões. |
@@ -134,7 +134,7 @@ sem tráfego de rede.
 ### Ciclo de vida de jobs e itens
 
 Há dois níveis de estado: o **job** do painel (um pedido de download, na fila FIFO)
-e cada **item de mídia** registrado no SQLite.
+e cada **item de mídia**. Ambos são persistidos no mesmo SQLite, junto do contador de jobs e do estado de pausa da fila.
 
 <p align="center">
   <img src="assets/job-lifecycle.svg" alt="Máquinas de estado: job queued, scanning, downloading e então completed, error ou cancelling/cancelled, com retry de volta para queued; item pending, downloading e então completed, skipped, failed ou cancelled, com retry-failed de volta para pending" width="100%">
@@ -143,7 +143,7 @@ e cada **item de mídia** registrado no SQLite.
 ### Autenticação e sessão criptografada
 
 <p align="center">
-  <img src="assets/auth-flow.svg" alt="Fluxo de autenticação: login por QR Code ou telefone gera a auth_key do Telegram, que é criptografada com AES-256-GCM usando uma chave derivada por scrypt de TBMD_SESSION_KEY e salva na tabela telegram_session do tbmd.db; sessões legadas são importadas uma vez; o painel é protegido por TBMD_WEB_TOKEN e cookie httpOnly" width="100%">
+  <img src="assets/auth-flow.svg" alt="Fluxo de autenticação: login por QR Code ou telefone gera a auth_key do Telegram, que é criptografada com AES-256-GCM usando uma chave derivada por scrypt de TBMD_SESSION_KEY e salva na tabela telegram_session do tbmd.db; o painel é protegido por TBMD_WEB_TOKEN e cookie httpOnly" width="100%">
 </p>
 
 > Todos os diagramas são SVGs estáticos em [`assets/`](assets/), com animações em CSS/SMIL
@@ -197,13 +197,11 @@ Preencha `API_ID`, `API_HASH` e `TBMD_SESSION_KEY` no `.env`:
 
 > **Como obter as credenciais:** acesse [my.telegram.org](https://my.telegram.org) com o número da sua conta, abra **API development tools**, preencha o formulário e copie o `api_id` e o `api_hash`.
 
-### 5. Autentique (uma única vez)
+### 5. Entre na sua conta
 
-```bash
-python src/tbmd.py --list
-```
+Inicie o painel com `python src/tbmd.py --web` ou siga a instalação por [Docker Compose](#docker-compose). A própria tela de autenticação oferece QR Code ou telefone com código e senha de duas etapas, quando exigida pelo Telegram.
 
-O Telethon pede o número de telefone, o código de login e, se necessário, a senha de verificação em duas etapas. Após autenticar, a CLI salva a sessão criptografada no banco SQLite. Você também pode iniciar a interface web e autenticar por QR Code sem passar pelo terminal.
+A CLI também permite autenticar com `python src/tbmd.py --list`. As duas interfaces salvam a sessão criptografada no banco definido por `DB_PATH`. Ao iniciar novamente com o mesmo banco e a mesma `TBMD_SESSION_KEY`, a aplicação restaura a autenticação.
 
 ---
 
@@ -213,11 +211,10 @@ O Telethon pede o número de telefone, o código de login e, se necessário, a s
 |---|---|---|
 | `API_ID` | *Obrigatório* | ID numérico da API do Telegram (my.telegram.org) |
 | `API_HASH` | *Obrigatório* | Hash da API do Telegram |
-| `SESSION_NAME` | `default_session` | Nome/caminho da sessão legada, usado somente para migração |
-| `DOWNLOAD_DIR` | `downloads` | Pasta base; os arquivos vão para `<DOWNLOAD_DIR>/<tipo>` |
+| `DOWNLOAD_DIR` | `downloads` | Pasta base: no painel, cria `<pasta escolhida>/<canal_em_snake_case>`; na CLI, o padrão é `<DOWNLOAD_DIR>/<tipo>` |
 | `BATCH_SIZE` | `5` | Máximo de downloads simultâneos (recomendado: 3 a 10) |
 | `MESSAGE_LIMIT` | `2000` | Máximo de mensagens inspecionadas (`0` = ilimitado) |
-| `DB_PATH` | `tbmd.db` | Caminho do banco SQLite da fila |
+| `DB_PATH` | `tbmd.db` | Banco SQLite de sessão criptografada, jobs, estado da fila e histórico de mídias; no Compose, `/app/data/tbmd.db` |
 | `TBMD_SESSION_KEY` | *Obrigatório* | Chave de criptografia da sessão no banco; gere um valor aleatório forte e mantenha-o seguro |
 | `TBMD_WEB_TOKEN` | *vazio* | Token de acesso ao painel; vazio = painel acessível sem token |
 | `WEB_HOST` | `127.0.0.1` | Host do servidor web |
@@ -241,25 +238,17 @@ A sessão do Telegram **é** a autenticação: se ela existir no banco, você j�
 
 ### Fluxo no painel web
 
-1. **QR Code** (recomendado) — abra o Telegram no celular em **Ajustes → Aparelhos → Conectar dispositivo** e escaneie o código exibido no painel. É o mesmo mecanismo usado pelo Telegram Desktop, não exige digitar telefone nem código.
+1. **QR Code** (recomendado) — abra o Telegram no celular em **Ajustes → Aparelhos → Conectar dispositivo** e escaneie o código exibido no painel. O painel aguarda a confirmação no celular e solicita a senha de duas etapas se a conta tiver 2FA.
 2. **Telefone** — informe o número com código do país, receba o código no Telegram e, se sua conta tiver verificação em duas etapas, digite a senha de 2FA.
 
 ### Como a sessão é guardada
 
-O Telethon grava a `auth_key` de 256 bytes em claro tanto no arquivo `.session` quanto no `StringSession`. Aqui ela é criptografada com **AES-256-GCM**, com a chave derivada via **scrypt** de `TBMD_SESSION_KEY` no `.env`.
+Durante o login, o cliente mantém a sessão em memória. Antes de salvá-la na tabela `telegram_session`, a aplicação a criptografa com **AES-256-GCM**, usando uma chave derivada via **scrypt** de `TBMD_SESSION_KEY`.
 
 - `TBMD_SESSION_KEY` é **obrigatória**: a aplicação recusa iniciar sem ela. Gere um valor forte com `python -c "import secrets; print(secrets.token_urlsafe(32))"` e guarde-o no `.env`.
 - A chave **nunca é solicitada no painel web** nem enviada por API; ela é lida somente no servidor a partir do ambiente. Quem tiver acesso ao `.env` poderá descriptografar a sessão, portanto proteja esse arquivo.
 - A chave incorreta é detectada pelo próprio GCM (falha de autenticação). Corrija `TBMD_SESSION_KEY` e reinicie o servidor; não faça login com uma chave diferente sobre a sessão existente.
 - A sessão é revogada no Telegram e apagada do banco pelo botão **Sair** no cabeçalho.
-
-### Sessão legada
-
-Um `default_session.session` existente já é SQLite do Telethon, mas contém a chave de autenticação em claro. CLI e web importam esse arquivo para a tabela criptografada `telegram_session` quando o banco ainda não contém sessão. Novos logins da CLI usam sessão em memória e persistem somente no banco criptografado.
-
-O Compose padrão não monta sessões legadas e não requer arquivo de migração. Para instalações antigas que ainda precisam importar uma sessão, adicione temporariamente um bind mount do arquivo existente ao `docker-compose.yml` local (por exemplo, `./default_session.session:/app/default_session.session`). Confirme antes que a origem é um arquivo, para o Docker não criar um diretório no lugar dele. Após validar a autenticação no painel e a restauração pelo banco, retire o mount, recrie o container e remova o arquivo legado local.
-
-Se já houver sessão no banco, ela tem prioridade. Não apague o banco para forçar migração: ele também contém a fila. Arquivos `.session` nunca devem ser versionados.
 
 ### Protegendo o painel
 
@@ -338,7 +327,7 @@ Acesse `http://localhost:8000` (ou o IP do servidor no homelab). A interface ofe
 
 ### Docker Compose
 
-1. Configure `.env`, incluindo `TBMD_SESSION_KEY` e, para proteger o painel, `TBMD_WEB_TOKEN`. Faça login diretamente no painel por QR ou telefone; não é necessário gerar arquivo `.session`.
+1. Configure `.env`, incluindo `TBMD_SESSION_KEY` e, para proteger o painel, `TBMD_WEB_TOKEN`. Após iniciar o container, faça login diretamente no painel por QR ou telefone.
 2. Copie o exemplo versionado e ajuste os volumes e portas na sua configuração local:
 
    ```bash
@@ -357,20 +346,9 @@ O volume nomeado `tbmd-data` preserva `/app/data/tbmd.db` e seus arquivos WAL en
 
 O SQLite em `DB_PATH` é a única persistência dos jobs e do estado da fila: `web_jobs` guarda os lotes, sua ordem e histórico; `web_queue_state` guarda o contador de IDs e o estado de pausa. Essas tabelas compartilham o banco com `queue_items` (mídias) e `telegram_session` (sessão criptografada). Tudo fica no volume `tbmd-data`, inclusive após recriar o container. Jobs e metadados são gravados na mesma transação, sem o antigo limite de 100 jobs que poderia descartar itens pendentes.
 
-#### Migração do histórico web antigo
+Para atualizar versões anteriores que ainda gravavam o histórico web em JSON, consulte [Atualização de instalações antigas](docs/UPGRADING.md) antes de recriar o container.
 
-`jobs_history.json` é apenas uma entrada de migração, nunca mais um arquivo de saída. No primeiro início, a aplicação procura esse arquivo ao lado do banco e depois na raiz do projeto. A primeira origem encontrada é importada; depois disso, o SQLite tem prioridade mesmo se todos os jobs forem apagados. Um JSON inválido impede o início para evitar perda silenciosa; preserve e corrija o arquivo antes de tentar novamente.
-
-Em uma instalação local, inicie normalmente com o JSON antigo presente e o `DB_PATH` correto. No Docker, o JSON da versão anterior pode estar apenas na camada efêmera do container. **Antes de recriá-lo**, aguarde o download ativo terminar e copie o histórico para o volume persistente:
-
-```bash
-docker compose exec tbmd-web python -c 'import shutil; shutil.copy2("/app/jobs_history.json", "/app/data/jobs_history.json")'
-docker compose up -d --build
-```
-
-Se você alterou o diretório de `DB_PATH`, ajuste o caminho de destino da cópia. Confira os jobs, sua ordem e a pausa no painel e recrie o container mais uma vez para confirmar a restauração. Após validar, remova o JSON legado do host e do volume; ele não é mais necessário. Não copie o histórico do host sobre o do container se forem instalações diferentes: cada arquivo deve ser importado no banco correspondente.
-
-Jobs que estavam aguardando permanecem na fila e voltam a executar quando houver sessão autenticada e a fila não estiver pausada. Jobs interrompidos durante a execução ficam como cancelados após reiniciar e podem ser reenfileirados explicitamente pelo painel. A sessão criptografada e os registros das mídias não são substituídos pela migração.
+Jobs que estavam aguardando permanecem na fila e voltam a executar quando houver sessão autenticada e a fila não estiver pausada. Jobs interrompidos durante a execução ficam como cancelados após reiniciar e podem ser reenfileirados pelo painel.
 
 No passo 3, o único atalho recomendado é `DOWNLOAD_DIR` (`/downloads` no container), apontando para o volume persistente. Você pode navegar e escolher outra pasta base.
 
@@ -393,9 +371,9 @@ Todo item baixado é registrado no SQLite (`tbmd.db`, modo WAL) com status, núm
 | `failed` | Falhou após as tentativas configuradas |
 | `cancelled` | Cancelado pelo usuário ou por reinício |
 
-- Interromper com `Ctrl+C` e executar `python src/tbmd.py` novamente retoma de onde parou.
+- Ao executar novamente, as mídias já concluídas são reconhecidas e puladas. No painel, use **Retry** para reenfileirar um job interrompido.
 - Itens com falha podem ser re-enfileirados em lote com `--retry-failed` ou pelo botão **Retry** no painel web.
-- O `download_state.json` legado continua sendo lido e migrado para o SQLite automaticamente.
+- No painel, jobs, ordem, pausa e contador são restaurados do SQLite. Limpar o histórico não reinicia o contador nem faz reaparecer jobs apagados.
 
 ---
 

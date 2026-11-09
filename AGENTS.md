@@ -107,7 +107,7 @@ Encrypted Telegram session storage:
 - **`SessionStore`**: Reads and writes the session in the `telegram_session` table, encrypted with AES-256-GCM (key derived via scrypt).
 - **`derive_key()` / `encrypt()` / `decrypt()`**: Pure crypto primitives; a wrong passphrase raises `SessionKeyError` through the GCM authentication tag.
 - **`TBMD_SESSION_KEY`**: Mandatory server-side environment variable; never accept the encryption key from an API request or web form.
-- **`migrate_legacy_session()`**: Converts a legacy `*.session` file into a string session.
+- New authentication uses in-memory Telethon sessions and persists only encrypted session data in SQLite. Compatibility helpers for older installations are not part of the normal setup.
 
 ### `src/web/`
 FastAPI web application and homelab dashboard:
@@ -175,14 +175,14 @@ python3 -m unittest discover tests
 - Before committing, run the test suite and review `git status` to confirm no
   credentials, session files, or databases are staged.
 
-Authentication lifecycle: `TelegramAuthService._finalize()` notifies the manager through `on_authorized`; keep manager, queue and WebSocket authentication state synchronized. CLI clients use `StringSession`, save after context entry (Telethon auto-authenticates there), and import legacy SQLite sessions only when no encrypted session exists. Docker legacy import, when needed, uses a temporary bind mount in the local Compose file; remove it after validating encrypted session restoration. No dedicated migration Compose is required.
+Authentication lifecycle: `TelegramAuthService._finalize()` notifies the manager through `on_authorized`; keep manager, queue and WebSocket authentication state synchronized. CLI clients use in-memory `StringSession` and save encrypted state after context entry (Telethon auto-authenticates there). Normal installation documentation must describe SQLite authentication and direct login through the panel or CLI; do not instruct users to generate or mount standalone authentication files.
 
 
 ## 8. Local deployment files
 
 - Track only `docker-compose.example.yml` as the deployment template. Copy it to `docker-compose.yml` for local use; the latter must remain ignored and must never be staged. Document template changes in README.md.
-- Legacy `*.session` files are only migration inputs. After confirming the encrypted database session is authorized and survives container recreation without a legacy mount, remove the obsolete local session. Never commit authentication files.
+- Authentication is stored encrypted in `telegram_session` at `DB_PATH`; new logins never require separate authentication files. Never commit authentication data or databases.
 - SQLite at `DB_PATH` is the only runtime persistence for web jobs, FIFO order, history, the job counter and queue pause state. Save jobs and queue metadata in one transaction. Never truncate pending jobs to enforce a history limit.
 - `jobs_history.json` is only a legacy migration input (next to the database first, then project root), never an output. Import only if `web_queue_state` is absent; an existing empty queue is authoritative and must not resurrect deleted jobs. Reject malformed imports without changing database state or deleting the source.
-- Before upgrading an old Docker container, preserve its legacy JSON in the database volume before container recreation. Validate SQLite restoration before deleting the legacy JSON. Do not merge separate host/container queues implicitly.
+- Keep legacy web-history upgrade steps in `docs/UPGRADING.md`, separate from the current installation flow. Before recreating an old Docker container, preserve its legacy JSON in the database volume. Validate SQLite restoration before deleting the source. Do not merge separate host/container queues implicitly.
 - On startup, keep queued jobs pending and mark interrupted scanning/downloading/cancelling jobs cancelled for explicit retry. Persist state changes and final metrics on shutdown; await cancelled workers before the final save. Test migration, rollback, restart, pause, FIFO changes, retries and clearing history with temporary databases.
